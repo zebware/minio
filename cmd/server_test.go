@@ -1268,7 +1268,7 @@ func (s *TestSuiteCommon) TestPutObjectLongName(c *C) {
 	// make long object name.
 	longObjName = fmt.Sprintf("%0256d", 1)
 	if IsDocker() || IsKubernetes() {
-		longObjName = fmt.Sprintf("%0253d", 1)
+		longObjName = fmt.Sprintf("%0243d", 1)
 	}
 
 	buffer = bytes.NewReader([]byte("hello world"))
