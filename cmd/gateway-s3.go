@@ -25,6 +25,7 @@ import (
 
 	minio "github.com/minio/minio-go"
 	"github.com/minio/minio-go/pkg/policy"
+	"github.com/minio/minio-go/pkg/s3utils"
 )
 
 // s3ToObjectError converts Minio errors to minio object layer errors.
@@ -161,6 +162,17 @@ func (l *s3Objects) MakeBucketWithLocation(bucket, location string) error {
 
 // GetBucketInfo gets bucket metadata..
 func (l *s3Objects) GetBucketInfo(bucket string) (bi BucketInfo, e error) {
+	// Verify if bucket name is valid.
+	// We are using a separate helper function here to validate bucket
+	// names instead of IsValidBucketName() because there is a possibility
+	// that certains users might have buckets which are non-DNS compliant
+	// in us-east-1 and we might severely restrict them by not allowing
+	// access to these buckets.
+	// Ref - http://docs.aws.amazon.com/AmazonS3/latest/dev/BucketRestrictions.html
+	if s3utils.CheckValidBucketName(bucket) != nil {
+		return bi, traceError(BucketNameInvalid{Bucket: bucket})
+	}
+
 	buckets, err := l.Client.ListBuckets()
 	if err != nil {
 		return bi, s3ToObjectError(traceError(err), bucket)
@@ -218,7 +230,7 @@ func (l *s3Objects) ListObjects(bucket string, prefix string, marker string, del
 }
 
 // ListObjectsV2 lists all blobs in S3 bucket filtered by prefix
-func (l *s3Objects) ListObjectsV2(bucket, prefix, continuationToken string, fetchOwner bool, delimiter string, maxKeys int) (loi ListObjectsV2Info, e error) {
+func (l *s3Objects) ListObjectsV2(bucket, prefix, continuationToken, delimiter string, maxKeys int, fetchOwner bool, startAfter string) (loi ListObjectsV2Info, e error) {
 	result, err := l.Client.ListObjectsV2(bucket, prefix, continuationToken, fetchOwner, delimiter, maxKeys)
 	if err != nil {
 		return loi, s3ToObjectError(traceError(err), bucket)
@@ -330,32 +342,18 @@ func (l *s3Objects) GetObjectInfo(bucket string, object string) (objInfo ObjectI
 	return fromMinioClientObjectInfo(bucket, oi), nil
 }
 
-// Decodes hex encoded md5, sha256 into their raw byte representations.
-func getMD5AndSha256SumBytes(md5Hex, sha256Hex string) (md5Bytes, sha256Bytes []byte, err error) {
-	if md5Hex != "" {
-		md5Bytes, err = hex.DecodeString(md5Hex)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	if sha256Hex != "" {
-		sha256Bytes, err = hex.DecodeString(sha256Hex)
-		if err != nil {
-			return nil, nil, err
-		}
-	}
-	return md5Bytes, sha256Bytes, nil
-}
-
 // PutObject creates a new object with the incoming data,
-func (l *s3Objects) PutObject(bucket string, object string, size int64, data io.Reader, metadata map[string]string, sha256sum string) (objInfo ObjectInfo, e error) {
-	md5Bytes, sha256Bytes, err := getMD5AndSha256SumBytes(metadata["etag"], sha256sum)
+func (l *s3Objects) PutObject(bucket string, object string, data *HashReader, metadata map[string]string) (objInfo ObjectInfo, err error) {
+	sha256sumBytes, err := hex.DecodeString(data.sha256Sum)
+	if err != nil {
+		return objInfo, s3ToObjectError(traceError(err), bucket, object)
+	}
+	md5sumBytes, err := hex.DecodeString(metadata["etag"])
 	if err != nil {
 		return objInfo, s3ToObjectError(traceError(err), bucket, object)
 	}
 	delete(metadata, "etag")
-
-	oi, err := l.Client.PutObject(bucket, object, size, data, md5Bytes, sha256Bytes, toMinioClientMetadata(metadata))
+	oi, err := l.Client.PutObject(bucket, object, data, data.Size(), md5sumBytes, sha256sumBytes, toMinioClientMetadata(metadata))
 	if err != nil {
 		return objInfo, s3ToObjectError(traceError(err), bucket, object)
 	}
@@ -462,17 +460,19 @@ func fromMinioClientMetadata(metadata map[string][]string) map[string]string {
 }
 
 // toMinioClientMetadata converts metadata to map[string][]string
-func toMinioClientMetadata(metadata map[string]string) map[string][]string {
-	mm := map[string][]string{}
+func toMinioClientMetadata(metadata map[string]string) map[string]string {
+	mm := map[string]string{}
 	for k, v := range metadata {
-		mm[http.CanonicalHeaderKey(k)] = []string{v}
+		mm[http.CanonicalHeaderKey(k)] = v
 	}
 	return mm
 }
 
 // NewMultipartUpload upload object in multiple parts
 func (l *s3Objects) NewMultipartUpload(bucket string, object string, metadata map[string]string) (uploadID string, err error) {
-	return l.Client.NewMultipartUpload(bucket, object, toMinioClientMetadata(metadata))
+	// Create PutObject options
+	opts := minio.PutObjectOptions{UserMetadata: metadata}
+	return l.Client.NewMultipartUpload(bucket, object, opts)
 }
 
 // CopyObjectPart copy part of object to other bucket and object
@@ -492,13 +492,18 @@ func fromMinioClientObjectPart(op minio.ObjectPart) PartInfo {
 }
 
 // PutObjectPart puts a part of object in bucket
-func (l *s3Objects) PutObjectPart(bucket string, object string, uploadID string, partID int, size int64, data io.Reader, md5Hex string, sha256sum string) (pi PartInfo, e error) {
-	md5Bytes, sha256Bytes, err := getMD5AndSha256SumBytes(md5Hex, sha256sum)
+func (l *s3Objects) PutObjectPart(bucket string, object string, uploadID string, partID int, data *HashReader) (pi PartInfo, e error) {
+	md5HexBytes, err := hex.DecodeString(data.md5Sum)
 	if err != nil {
-		return pi, s3ToObjectError(traceError(err), bucket, object)
+		return pi, err
 	}
 
-	info, err := l.Client.PutObjectPart(bucket, object, uploadID, partID, size, data, md5Bytes, sha256Bytes)
+	sha256sumBytes, err := hex.DecodeString(data.sha256Sum)
+	if err != nil {
+		return pi, err
+	}
+
+	info, err := l.Client.PutObjectPart(bucket, object, uploadID, partID, data, data.Size(), md5HexBytes, sha256sumBytes)
 	if err != nil {
 		return pi, err
 	}

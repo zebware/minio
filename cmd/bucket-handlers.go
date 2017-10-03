@@ -380,11 +380,7 @@ func (api objectAPIHandlers) PutBucketHandler(w http.ResponseWriter, r *http.Req
 	}
 
 	// PutBucket does not have any bucket action.
-	s3Error := checkRequestAuthType(r, "", "", globalMinioDefaultRegion)
-	if s3Error == ErrInvalidRegion {
-		// Clients like boto3 send putBucket() call signed with region that is configured.
-		s3Error = checkRequestAuthType(r, "", "", serverConfig.GetRegion())
-	}
+	s3Error := checkRequestAuthType(r, "", "", serverConfig.GetRegion())
 	if s3Error != ErrNone {
 		writeErrorResponse(w, s3Error, r.URL)
 		return
@@ -562,15 +558,17 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 	}
 	defer objectLock.Unlock()
 
-	objInfo, err := objectAPI.PutObject(bucket, object, fileSize, fileBody, metadata, sha256sum)
+	objInfo, err := objectAPI.PutObject(bucket, object, NewHashReader(fileBody, fileSize, metadata["etag"], sha256sum), metadata)
 	if err != nil {
 		errorIf(err, "Unable to create object.")
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return
 	}
 
+	port := r.Header.Get("X-Forward-Proto")
+	location := getObjectLocation(r.Host, port, bucket, object)
 	w.Header().Set("ETag", `"`+objInfo.ETag+`"`)
-	w.Header().Set("Location", getObjectLocation(bucket, object))
+	w.Header().Set("Location", location)
 
 	// Get host and port from Request.RemoteAddr.
 	host, port, err := net.SplitHostPort(r.RemoteAddr)
@@ -603,7 +601,7 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 			Bucket:   objInfo.Bucket,
 			Key:      objInfo.Name,
 			ETag:     `"` + objInfo.ETag + `"`,
-			Location: getObjectLocation(objInfo.Bucket, objInfo.Name),
+			Location: location,
 		})
 		writeResponse(w, http.StatusCreated, resp, "application/xml")
 	case "200":

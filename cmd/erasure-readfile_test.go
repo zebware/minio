@@ -24,14 +24,9 @@ import (
 	"testing"
 
 	humanize "github.com/dustin/go-humanize"
-	"github.com/minio/minio/pkg/bpool"
 )
 
-func (d badDisk) ReadFile(volume string, path string, offset int64, buf []byte) (n int64, err error) {
-	return 0, errFaultyDisk
-}
-
-func (d badDisk) ReadFileWithVerify(volume string, path string, offset int64, buf []byte, verifier *BitrotVerifier) (n int64, err error) {
+func (d badDisk) ReadFile(volume string, path string, offset int64, buf []byte, verifier *BitrotVerifier) (n int64, err error) {
 	return 0, errFaultyDisk
 }
 
@@ -112,9 +107,8 @@ func TestErasureReadFile(t *testing.T) {
 			setup.Remove()
 			t.Fatalf("Test %d: failed to create erasure test file: %v", i, err)
 		}
-		pool := bpool.NewBytePool(getChunkSize(test.blocksize, test.dataBlocks), len(storage.disks))
 		writer := bytes.NewBuffer(nil)
-		readInfo, err := storage.ReadFile(writer, "testbucket", "object", test.offset, test.length, test.data, file.Checksums, test.algorithm, test.blocksize, pool)
+		readInfo, err := storage.ReadFile(writer, "testbucket", "object", test.offset, test.length, test.data, file.Checksums, test.algorithm, test.blocksize)
 		if err != nil && !test.shouldFail {
 			t.Errorf("Test %d: should pass but failed with: %v", i, err)
 		}
@@ -140,7 +134,7 @@ func TestErasureReadFile(t *testing.T) {
 			if test.offDisks > 0 {
 				storage.disks[0] = OfflineDisk
 			}
-			readInfo, err = storage.ReadFile(writer, "testbucket", "object", test.offset, test.length, test.data, file.Checksums, test.algorithm, test.blocksize, pool)
+			readInfo, err = storage.ReadFile(writer, "testbucket", "object", test.offset, test.length, test.data, file.Checksums, test.algorithm, test.blocksize)
 			if err != nil && !test.shouldFailQuorum {
 				t.Errorf("Test %d: should pass but failed with: %v", i, err)
 			}
@@ -208,11 +202,6 @@ func TestErasureReadFileRandomOffsetLength(t *testing.T) {
 	// To generate random offset/length.
 	r := rand.New(rand.NewSource(UTCNow().UnixNano()))
 
-	// create pool buffer which will be used by erasureReadFile for
-	// reading from disks and erasure decoding.
-	chunkSize := getChunkSize(blockSize, dataBlocks)
-	pool := bpool.NewBytePool(chunkSize, len(storage.disks))
-
 	buf := &bytes.Buffer{}
 
 	// Verify erasureReadFile() for random offsets and lengths.
@@ -222,7 +211,7 @@ func TestErasureReadFileRandomOffsetLength(t *testing.T) {
 
 		expected := data[offset : offset+readLen]
 
-		_, err = storage.ReadFile(buf, "testbucket", "testobject", offset, readLen, length, file.Checksums, DefaultBitrotAlgorithm, blockSize, pool)
+		_, err = storage.ReadFile(buf, "testbucket", "testobject", offset, readLen, length, file.Checksums, DefaultBitrotAlgorithm, blockSize)
 		if err != nil {
 			t.Fatal(err, offset, readLen)
 		}

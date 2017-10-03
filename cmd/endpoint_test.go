@@ -31,8 +31,6 @@ func TestNewEndpoint(t *testing.T) {
 	u3, _ := url.Parse("http://127.0.0.1:8080/path")
 	u4, _ := url.Parse("http://192.168.253.200/path")
 
-	errMsg := ": no such host"
-
 	testCases := []struct {
 		arg              string
 		expectedEndpoint Endpoint
@@ -40,44 +38,40 @@ func TestNewEndpoint(t *testing.T) {
 		expectedErr      error
 		skipDocker       bool
 	}{
-		{"foo", Endpoint{URL: &url.URL{Path: "foo"}, IsLocal: true}, PathEndpointType, nil, false},
-		{"/foo", Endpoint{URL: &url.URL{Path: "/foo"}, IsLocal: true}, PathEndpointType, nil, false},
-		{`\foo`, Endpoint{URL: &url.URL{Path: `\foo`}, IsLocal: true}, PathEndpointType, nil, false},
-		{"C", Endpoint{URL: &url.URL{Path: `C`}, IsLocal: true}, PathEndpointType, nil, false},
-		{"C:", Endpoint{URL: &url.URL{Path: `C:`}, IsLocal: true}, PathEndpointType, nil, false},
-		{"C:/", Endpoint{URL: &url.URL{Path: "C:"}, IsLocal: true}, PathEndpointType, nil, false},
-		{`C:\`, Endpoint{URL: &url.URL{Path: `C:\`}, IsLocal: true}, PathEndpointType, nil, false},
-		{`C:\foo`, Endpoint{URL: &url.URL{Path: `C:\foo`}, IsLocal: true}, PathEndpointType, nil, false},
-		{"C:/foo", Endpoint{URL: &url.URL{Path: "C:/foo"}, IsLocal: true}, PathEndpointType, nil, false},
-		{`C:\\foo`, Endpoint{URL: &url.URL{Path: `C:\\foo`}, IsLocal: true}, PathEndpointType, nil, false},
-		{"http:path", Endpoint{URL: &url.URL{Path: "http:path"}, IsLocal: true}, PathEndpointType, nil, false},
-		{"http:/path", Endpoint{URL: &url.URL{Path: "http:/path"}, IsLocal: true}, PathEndpointType, nil, false},
-		{"http:///path", Endpoint{URL: &url.URL{Path: "http:/path"}, IsLocal: true}, PathEndpointType, nil, false},
-		{"http://localhost/path", Endpoint{URL: u1, IsLocal: true}, URLEndpointType, nil, false},
-		{"http://localhost/path//", Endpoint{URL: u1, IsLocal: true}, URLEndpointType, nil, false},
-		{"https://example.org/path", Endpoint{URL: u2}, URLEndpointType, nil, false},
-		{"http://127.0.0.1:8080/path", Endpoint{URL: u3, IsLocal: true}, URLEndpointType, nil, false},
-		{"http://192.168.253.200/path", Endpoint{URL: u4}, URLEndpointType, nil, false},
-		{"", Endpoint{}, -1, fmt.Errorf("empty or root endpoint is not supported"), false},
-		{"/", Endpoint{}, -1, fmt.Errorf("empty or root endpoint is not supported"), false},
-		{`\`, Endpoint{}, -1, fmt.Errorf("empty or root endpoint is not supported"), false},
-		{"c://foo", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format"), false},
-		{"ftp://foo", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format"), false},
-		{"http://server/path?location", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format"), false},
-		{"http://:/path", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format: invalid port number"), false},
-		{"http://:8080/path", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format: empty host name"), false},
-		{"http://server:/path", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format: invalid port number"), false},
-		{"https://93.184.216.34:808080/path", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format: port number must be between 1 to 65535"), false},
-		{"http://server:8080//", Endpoint{}, -1, fmt.Errorf("empty or root path is not supported in URL endpoint"), false},
-		{"http://server:8080/", Endpoint{}, -1, fmt.Errorf("empty or root path is not supported in URL endpoint"), false},
-		{"http://server/path", Endpoint{}, -1, fmt.Errorf("lookup server" + errMsg), true},
-		{"192.168.1.210:9000", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format: missing scheme http or https"), false},
+		{"foo", Endpoint{URL: &url.URL{Path: "foo"}, IsLocal: true}, PathEndpointType, nil},
+		{"/foo", Endpoint{URL: &url.URL{Path: "/foo"}, IsLocal: true}, PathEndpointType, nil},
+		{`\foo`, Endpoint{URL: &url.URL{Path: `\foo`}, IsLocal: true}, PathEndpointType, nil},
+		{"C", Endpoint{URL: &url.URL{Path: `C`}, IsLocal: true}, PathEndpointType, nil},
+		{"C:", Endpoint{URL: &url.URL{Path: `C:`}, IsLocal: true}, PathEndpointType, nil},
+		{"C:/", Endpoint{URL: &url.URL{Path: "C:"}, IsLocal: true}, PathEndpointType, nil},
+		{`C:\`, Endpoint{URL: &url.URL{Path: `C:\`}, IsLocal: true}, PathEndpointType, nil},
+		{`C:\foo`, Endpoint{URL: &url.URL{Path: `C:\foo`}, IsLocal: true}, PathEndpointType, nil},
+		{"C:/foo", Endpoint{URL: &url.URL{Path: "C:/foo"}, IsLocal: true}, PathEndpointType, nil},
+		{`C:\\foo`, Endpoint{URL: &url.URL{Path: `C:\\foo`}, IsLocal: true}, PathEndpointType, nil},
+		{"http:path", Endpoint{URL: &url.URL{Path: "http:path"}, IsLocal: true}, PathEndpointType, nil},
+		{"http:/path", Endpoint{URL: &url.URL{Path: "http:/path"}, IsLocal: true}, PathEndpointType, nil},
+		{"http:///path", Endpoint{URL: &url.URL{Path: "http:/path"}, IsLocal: true}, PathEndpointType, nil},
+		{"http://localhost/path", Endpoint{URL: u1, IsLocal: true}, URLEndpointType, nil},
+		{"http://localhost/path//", Endpoint{URL: u1, IsLocal: true}, URLEndpointType, nil},
+		{"https://example.org/path", Endpoint{URL: u2}, URLEndpointType, nil},
+		{"http://127.0.0.1:8080/path", Endpoint{URL: u3, IsLocal: true}, URLEndpointType, nil},
+		{"http://192.168.253.200/path", Endpoint{URL: u4}, URLEndpointType, nil},
+		{"", Endpoint{}, -1, fmt.Errorf("empty or root endpoint is not supported")},
+		{"/", Endpoint{}, -1, fmt.Errorf("empty or root endpoint is not supported")},
+		{`\`, Endpoint{}, -1, fmt.Errorf("empty or root endpoint is not supported")},
+		{"c://foo", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format")},
+		{"ftp://foo", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format")},
+		{"http://server/path?location", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format")},
+		{"http://:/path", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format: invalid port number")},
+		{"http://:8080/path", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format: empty host name")},
+		{"http://server:/path", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format: invalid port number")},
+		{"https://93.184.216.34:808080/path", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format: port number must be between 1 to 65535")},
+		{"http://server:8080//", Endpoint{}, -1, fmt.Errorf("empty or root path is not supported in URL endpoint")},
+		{"http://server:8080/", Endpoint{}, -1, fmt.Errorf("empty or root path is not supported in URL endpoint")},
+		{"192.168.1.210:9000", Endpoint{}, -1, fmt.Errorf("invalid URL endpoint format: missing scheme http or https")},
 	}
 
 	for _, testCase := range testCases {
-		if testCase.skipDocker && (IsDocker() || IsKubernetes()) {
-			continue
-		}
 		endpoint, err := NewEndpoint(testCase.arg)
 		if testCase.expectedErr == nil {
 			if err != nil {
@@ -85,16 +79,8 @@ func TestNewEndpoint(t *testing.T) {
 			}
 		} else if err == nil {
 			t.Fatalf("error: expected = %v, got = <nil>", testCase.expectedErr)
-		} else {
-			var match bool
-			if strings.HasSuffix(testCase.expectedErr.Error(), errMsg) {
-				match = strings.HasSuffix(err.Error(), errMsg)
-			} else {
-				match = (testCase.expectedErr.Error() == err.Error())
-			}
-			if !match {
-				t.Fatalf("error: expected = %v, got = %v", testCase.expectedErr, err)
-			}
+		} else if testCase.expectedErr.Error() != err.Error() {
+			t.Fatalf("error: expected = %v, got = %v", testCase.expectedErr, err)
 		}
 
 		if err == nil && !reflect.DeepEqual(testCase.expectedEndpoint, endpoint) {

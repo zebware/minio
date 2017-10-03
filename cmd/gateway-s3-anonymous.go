@@ -45,7 +45,7 @@ func (l *s3Objects) AnonPutObject(bucket string, object string, size int64, data
 		delete(metadata, "etag")
 	}
 
-	oi, err := l.anonClient.PutObject(bucket, object, size, data, md5sumBytes, sha256sumBytes, toMinioClientMetadata(metadata))
+	oi, err := l.anonClient.PutObject(bucket, object, data, size, md5sumBytes, sha256sumBytes, toMinioClientMetadata(metadata))
 	if err != nil {
 		return objInfo, s3ToObjectError(traceError(err), bucket, object)
 	}
@@ -95,7 +95,7 @@ func (l *s3Objects) AnonListObjects(bucket string, prefix string, marker string,
 }
 
 // AnonListObjectsV2 - List objects in V2 mode, anonymously
-func (l *s3Objects) AnonListObjectsV2(bucket, prefix, continuationToken string, fetchOwner bool, delimiter string, maxKeys int) (loi ListObjectsV2Info, e error) {
+func (l *s3Objects) AnonListObjectsV2(bucket, prefix, continuationToken, delimiter string, maxKeys int, fetchOwner bool, startAfter string) (loi ListObjectsV2Info, e error) {
 	result, err := l.anonClient.ListObjectsV2(bucket, prefix, continuationToken, fetchOwner, delimiter, maxKeys)
 	if err != nil {
 		return loi, s3ToObjectError(traceError(err), bucket)

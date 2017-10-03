@@ -455,7 +455,6 @@ func testListMultipartUploadsHandler(obj ObjectLayer, instanceType, bucketName s
 
 		// verify response for V2 signed HTTP request.
 		reqV2, err := newTestSignedRequestV2("GET", u, 0, nil, testCase.accessKey, testCase.secretKey)
-
 		if err != nil {
 			t.Fatalf("Test %d: %s: Failed to create HTTP request for PutBucketPolicyHandler: <ERROR> %v", i+1, instanceType, err)
 		}
@@ -632,8 +631,7 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 	for i := 0; i < 10; i++ {
 		objectName := "test-object-" + strconv.Itoa(i)
 		// uploading the object.
-		_, err = obj.PutObject(bucketName, objectName, int64(len(contentBytes)), bytes.NewBuffer(contentBytes),
-			make(map[string]string), sha256sum)
+		_, err = obj.PutObject(bucketName, objectName, NewHashReader(bytes.NewBuffer(contentBytes), int64(len(contentBytes)), "", sha256sum), nil)
 		// if object upload fails stop the test.
 		if err != nil {
 			t.Fatalf("Put Object %d:  Error uploading object: <ERROR> %v", i, err)

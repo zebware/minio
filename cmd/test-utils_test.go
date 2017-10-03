@@ -52,6 +52,7 @@ import (
 
 	"github.com/fatih/color"
 	router "github.com/gorilla/mux"
+	"github.com/minio/minio-go/pkg/s3signer"
 )
 
 // Tests should initNSLock only once.
@@ -883,6 +884,8 @@ func preSignV2(req *http.Request, accessKeyID, secretAccessKey string, expires i
 		return errors.New("Presign cannot be generated without access and secret keys")
 	}
 
+	// FIXME: Remove following portion of code after fixing a bug in minio-go preSignV2.
+
 	d := UTCNow()
 	// Find epoch expires when the request will expire.
 	epochExpires := d.Unix() + expires
@@ -899,14 +902,20 @@ func preSignV2(req *http.Request, accessKeyID, secretAccessKey string, expires i
 	encodedResource := req.URL.RawPath
 	encodedQuery := req.URL.RawQuery
 	if encodedResource == "" {
-		splits := strings.Split(req.URL.Path, "?")
-		if len(splits) > 0 {
-			encodedResource = splits[0]
+		splits := strings.SplitN(req.URL.Path, "?", 2)
+		encodedResource = splits[0]
+		if len(splits) == 2 {
+			encodedQuery = splits[1]
 		}
 	}
 
+	unescapedQueries, err := unescapeQueries(encodedQuery)
+	if err != nil {
+		return err
+	}
+
 	// Get presigned string to sign.
-	stringToSign := presignV2STS(req.Method, encodedResource, encodedQuery, req.Header, expiresStr)
+	stringToSign := getStringToSignV2(req.Method, encodedResource, strings.Join(unescapedQueries, "&"), req.Header, expiresStr)
 	hm := hmac.New(sha1.New, []byte(secretAccessKey))
 	hm.Write([]byte(stringToSign))
 
@@ -924,42 +933,12 @@ func preSignV2(req *http.Request, accessKeyID, secretAccessKey string, expires i
 
 	// Save signature finally.
 	req.URL.RawQuery += "&Signature=" + url.QueryEscape(signature)
-
-	// Success.
 	return nil
 }
 
 // Sign given request using Signature V2.
 func signRequestV2(req *http.Request, accessKey, secretKey string) error {
-	// Initial time.
-	d := UTCNow()
-
-	// Add date if not present.
-	if date := req.Header.Get("Date"); date == "" {
-		req.Header.Set("Date", d.Format(http.TimeFormat))
-	}
-
-	splits := strings.Split(req.URL.Path, "?")
-	var encodedResource string
-	if len(splits) > 0 {
-		encodedResource = getURLEncodedName(splits[0])
-	}
-	encodedQuery := req.URL.Query().Encode()
-
-	// Calculate HMAC for secretAccessKey.
-	stringToSign := signV2STS(req.Method, encodedResource, encodedQuery, req.Header)
-	hm := hmac.New(sha1.New, []byte(secretKey))
-	hm.Write([]byte(stringToSign))
-
-	// Prepare auth header.
-	authHeader := new(bytes.Buffer)
-	authHeader.WriteString(fmt.Sprintf("%s %s:", signV2Algorithm, accessKey))
-	encoder := base64.NewEncoder(base64.StdEncoding, authHeader)
-	encoder.Write(hm.Sum(nil))
-	encoder.Close()
-
-	// Set Authorization header.
-	req.Header.Set("Authorization", authHeader.String())
+	req = s3signer.SignV2(*req, accessKey, secretKey)
 	return nil
 }
 

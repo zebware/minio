@@ -128,22 +128,16 @@ func TestMustGetLocalIP4(t *testing.T) {
 }
 
 func TestGetHostIP(t *testing.T) {
-	errMsg := ": no such host"
 	testCases := []struct {
 		host           string
 		expectedIPList set.StringSet
 		expectedErr    error
-		skipDocker     bool
 	}{
-		{"localhost", set.CreateStringSet("127.0.0.1"), nil, false},
-		{"example.org", set.CreateStringSet("93.184.216.34"), nil, false},
-		{"myserver", nil, fmt.Errorf("lookup server" + errMsg), true},
+		{"localhost", set.CreateStringSet("127.0.0.1"), nil},
+		{"example.org", set.CreateStringSet("93.184.216.34"), nil},
 	}
 
 	for _, testCase := range testCases {
-		if testCase.skipDocker && (IsDocker() || IsKubernetes()){
-			continue
-		}
 		ipList, err := getHostIP4(testCase.host)
 		if testCase.expectedErr == nil {
 			if err != nil {
