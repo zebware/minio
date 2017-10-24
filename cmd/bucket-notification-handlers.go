@@ -63,13 +63,13 @@ func (api objectAPIHandlers) GetBucketNotificationHandler(w http.ResponseWriter,
 
 	// Attempt to successfully load notification config.
 	nConfig, err := loadNotificationConfig(bucket, objAPI)
-	if err != nil && err != errNoSuchNotifications {
+	if err != nil && errorCause(err) != errNoSuchNotifications {
 		errorIf(err, "Unable to read notification configuration.")
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return
 	}
 	// For no notifications we write a dummy XML.
-	if err == errNoSuchNotifications {
+	if errorCause(err) == errNoSuchNotifications {
 		// Complies with the s3 behavior in this regard.
 		nConfig = &notificationConfig{}
 	}
@@ -296,6 +296,7 @@ func (api objectAPIHandlers) ListenBucketNotificationHandler(w http.ResponseWrit
 		return
 	}
 
+	targetServer := GetLocalPeer(globalEndpoints)
 	accountID := fmt.Sprintf("%d", UTCNow().UnixNano())
 	accountARN := fmt.Sprintf(
 		"%s:%s:%s:%s-%s",
@@ -303,8 +304,9 @@ func (api objectAPIHandlers) ListenBucketNotificationHandler(w http.ResponseWrit
 		serverConfig.GetRegion(),
 		accountID,
 		snsTypeMinio,
-		globalMinioAddr,
+		targetServer,
 	)
+
 	var filterRules []filterRule
 
 	for _, prefix := range prefixes {
@@ -357,7 +359,7 @@ func (api objectAPIHandlers) ListenBucketNotificationHandler(w http.ResponseWrit
 	// nEventCh
 	lc := listenerConfig{
 		TopicConfig:  *topicCfg,
-		TargetServer: globalMinioAddr,
+		TargetServer: targetServer,
 	}
 
 	err = AddBucketListenerConfig(bucket, &lc, objAPI)

@@ -19,11 +19,13 @@ package cmd
 import (
 	"context"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"math"
+	"os"
 	"regexp"
 	"strings"
 	"time"
@@ -37,6 +39,15 @@ import (
 
 	minio "github.com/minio/minio-go"
 	"github.com/minio/minio-go/pkg/policy"
+	"github.com/minio/minio/pkg/hash"
+)
+
+var (
+	// Project ID format is not valid.
+	errGCSInvalidProjectID = errors.New("GCS project id is either empty or invalid")
+
+	// Project ID not found
+	errGCSProjectIDNotFound = errors.New("unknown project id")
 )
 
 const (
@@ -59,14 +70,14 @@ const (
 	// Refer https://cloud.google.com/storage/docs/composite-objects
 	gcsMaxComponents = 32
 
-	// gcsMaxPartCount - maximum multipart parts GCS supports which is 32 x 32 = 1024.
-	gcsMaxPartCount = 1024
-
 	// Every 24 hours we scan minio.sys.tmp to delete expired multiparts in minio.sys.tmp
 	gcsCleanupInterval = time.Hour * 24
 
 	// The cleanup routine deletes files older than 2 weeks in minio.sys.tmp
 	gcsMultipartExpiry = time.Hour * 24 * 14
+
+	// Project ID key in credentials.json
+	gcsProjectIDKey = "project_id"
 )
 
 // Stored in gcs.json - Contents of this file is not used anywhere. It can be
@@ -242,6 +253,7 @@ func checkGCSProjectID(ctx context.Context, projectID string) error {
 
 // gcsGateway - Implements gateway for Minio and GCS compatible object storage servers.
 type gcsGateway struct {
+	gatewayUnsupported
 	client     *storage.Client
 	anonClient *minio.Core
 	projectID  string
@@ -250,11 +262,34 @@ type gcsGateway struct {
 
 const googleStorageEndpoint = "storage.googleapis.com"
 
+// Returns projectID from the GOOGLE_APPLICATION_CREDENTIALS file.
+func gcsParseProjectID(credsFile string) (projectID string, err error) {
+	contents, err := ioutil.ReadFile(credsFile)
+	if err != nil {
+		return projectID, err
+	}
+	googleCreds := make(map[string]string)
+	if err = json.Unmarshal(contents, &googleCreds); err != nil {
+		return projectID, err
+	}
+	return googleCreds[gcsProjectIDKey], err
+}
+
 // newGCSGateway returns gcs gatewaylayer
 func newGCSGateway(projectID string) (GatewayLayer, error) {
 	ctx := context.Background()
 
-	err := checkGCSProjectID(ctx, projectID)
+	var err error
+	if projectID == "" {
+		// If project ID is not provided on command line, we figure it out
+		// from the credentials.json file.
+		projectID, err = gcsParseProjectID(os.Getenv("GOOGLE_APPLICATION_CREDENTIALS"))
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	err = checkGCSProjectID(ctx, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -712,18 +747,12 @@ func (l *gcsGateway) GetObjectInfo(bucket string, object string) (ObjectInfo, er
 }
 
 // PutObject - Create a new object with the incoming data,
-func (l *gcsGateway) PutObject(bucket string, key string, data *HashReader, metadata map[string]string) (ObjectInfo, error) {
-
+func (l *gcsGateway) PutObject(bucket string, key string, data *hash.Reader, metadata map[string]string) (ObjectInfo, error) {
 	// if we want to mimic S3 behavior exactly, we need to verify if bucket exists first,
 	// otherwise gcs will just return object not exist in case of non-existing bucket
 	if _, err := l.client.Bucket(bucket).Attrs(l.ctx); err != nil {
 		return ObjectInfo{}, gcsToObjectError(traceError(err), bucket)
 	}
-
-	if _, err := hex.DecodeString(metadata["etag"]); err != nil {
-		return ObjectInfo{}, gcsToObjectError(traceError(err), bucket, key)
-	}
-	delete(metadata, "etag")
 
 	object := l.client.Bucket(bucket).Object(key)
 
@@ -738,13 +767,9 @@ func (l *gcsGateway) PutObject(bucket string, key string, data *HashReader, meta
 		w.Close()
 		return ObjectInfo{}, gcsToObjectError(traceError(err), bucket, key)
 	}
+
 	// Close the object writer upon success.
 	w.Close()
-
-	if err := data.Verify(); err != nil { // Verify sha256sum after close.
-		object.Delete(l.ctx)
-		return ObjectInfo{}, gcsToObjectError(traceError(err), bucket, key)
-	}
 
 	attrs, err := object.Attrs(l.ctx)
 	if err != nil {
@@ -818,11 +843,6 @@ func (l *gcsGateway) ListMultipartUploads(bucket string, prefix string, keyMarke
 	}, nil
 }
 
-// CopyObjectPart - copy part of object to other bucket and object
-func (l *gcsGateway) CopyObjectPart(srcBucket string, srcObject string, destBucket string, destObject string, uploadID string, partID int, startOffset int64, length int64) (info PartInfo, err error) {
-	return PartInfo{}, traceError(NotSupported{})
-}
-
 // Checks if minio.sys.tmp/multipart/v1/<upload-id>/gcs.json exists, returns
 // an object layer compatible error upon any error.
 func (l *gcsGateway) checkUploadIDExists(bucket string, key string, uploadID string) error {
@@ -831,11 +851,11 @@ func (l *gcsGateway) checkUploadIDExists(bucket string, key string, uploadID str
 }
 
 // PutObjectPart puts a part of object in bucket
-func (l *gcsGateway) PutObjectPart(bucket string, key string, uploadID string, partNumber int, data *HashReader) (PartInfo, error) {
+func (l *gcsGateway) PutObjectPart(bucket string, key string, uploadID string, partNumber int, data *hash.Reader) (PartInfo, error) {
 	if err := l.checkUploadIDExists(bucket, key, uploadID); err != nil {
 		return PartInfo{}, err
 	}
-	etag := data.md5Sum
+	etag := data.MD5HexString()
 	if etag == "" {
 		// Generate random ETag.
 		etag = getMD5Hash([]byte(mustGetUUID()))
@@ -853,10 +873,6 @@ func (l *gcsGateway) PutObjectPart(bucket string, key string, uploadID string, p
 	// Make sure to close the object writer upon success.
 	w.Close()
 
-	if err := data.Verify(); err != nil {
-		object.Delete(l.ctx)
-		return PartInfo{}, gcsToObjectError(traceError(err), bucket, key)
-	}
 	return PartInfo{
 		PartNumber:   partNumber,
 		ETag:         etag,

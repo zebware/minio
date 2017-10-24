@@ -50,15 +50,6 @@ type httpConn struct {
 	Endpoint string
 }
 
-// List of success status.
-var successStatus = []int{
-	http.StatusOK,
-	http.StatusAccepted,
-	http.StatusContinue,
-	http.StatusNoContent,
-	http.StatusPartialContent,
-}
-
 // isNetErrorIgnored - is network error ignored.
 func isNetErrorIgnored(err error) bool {
 	if err == nil {
@@ -100,10 +91,9 @@ func isNetErrorIgnored(err error) bool {
 }
 
 // Lookup endpoint address by successfully POSTting
-// a JSON which would send out minio release.
+// empty body.
 func lookupEndpoint(urlStr string) error {
-	minioRelease := bytes.NewReader([]byte(ReleaseTag))
-	req, err := http.NewRequest("POST", urlStr, minioRelease)
+	req, err := http.NewRequest("POST", urlStr, bytes.NewReader([]byte("")))
 	if err != nil {
 		return err
 	}
@@ -116,8 +106,8 @@ func lookupEndpoint(urlStr string) error {
 		},
 	}
 
-	// Set content-type.
-	req.Header.Set("Content-Type", "application/json")
+	// Set content-length to zero as there is no payload.
+	req.ContentLength = 0
 
 	// Set proper server user-agent.
 	req.Header.Set("User-Agent", globalServerUserAgent)

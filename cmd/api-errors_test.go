@@ -19,6 +19,8 @@ package cmd
 import (
 	"errors"
 	"testing"
+
+	"github.com/minio/minio/pkg/hash"
 )
 
 func TestAPIErrCode(t *testing.T) {
@@ -28,8 +30,12 @@ func TestAPIErrCode(t *testing.T) {
 	}{
 		// Valid cases.
 		{
-			BadDigest{},
+			hash.BadDigest{},
 			ErrBadDigest,
+		},
+		{
+			hash.SHA256Mismatch{},
+			ErrContentSHA256Mismatch,
 		},
 		{
 			IncompleteBody{},
@@ -104,20 +110,12 @@ func TestAPIErrCode(t *testing.T) {
 			ErrStorageFull,
 		},
 		{
-			NotSupported{},
-			ErrNotSupported,
-		},
-		{
 			NotImplemented{},
 			ErrNotImplemented,
 		},
 		{
 			errSignatureMismatch,
 			ErrSignatureDoesNotMatch,
-		},
-		{
-			errContentSHA256Mismatch,
-			ErrContentSHA256Mismatch,
 		}, // End of all valid cases.
 
 		// Case where err is nil.

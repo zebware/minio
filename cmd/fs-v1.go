@@ -17,7 +17,6 @@
 package cmd
 
 import (
-	"encoding/hex"
 	"fmt"
 	"io"
 	"io/ioutil"
@@ -27,6 +26,7 @@ import (
 	"sort"
 	"syscall"
 
+	"github.com/minio/minio/pkg/hash"
 	"github.com/minio/minio/pkg/lock"
 )
 
@@ -86,7 +86,7 @@ func newFSObjectLayer(fsPath string) (ObjectLayer, error) {
 		return nil, err
 	}
 
-	fi, err := osStat((fsPath))
+	fi, err := os.Stat((fsPath))
 	if err == nil {
 		if !fi.IsDir() {
 			return nil, syscall.ENOTDIR
@@ -201,7 +201,7 @@ func (fs fsObjects) statBucketDir(bucket string) (os.FileInfo, error) {
 	if err != nil {
 		return nil, err
 	}
-	st, err := fsStatDir(bucketDir)
+	st, err := fsStatVolume(bucketDir)
 	if err != nil {
 		return nil, err
 	}
@@ -230,7 +230,7 @@ func (fs fsObjects) GetBucketInfo(bucket string) (bi BucketInfo, e error) {
 		return bi, toObjectErr(err, bucket)
 	}
 
-	// As osStat() doesn't carry other than ModTime(), use ModTime() as CreatedTime.
+	// As os.Stat() doesn't carry other than ModTime(), use ModTime() as CreatedTime.
 	createdTime := st.ModTime()
 	return BucketInfo{
 		Name:    bucket,
@@ -255,7 +255,7 @@ func (fs fsObjects) ListBuckets() ([]BucketInfo, error) {
 			continue
 		}
 		var fi os.FileInfo
-		fi, err = fsStatDir(pathJoin(fs.fsPath, entry))
+		fi, err = fsStatVolume(pathJoin(fs.fsPath, entry))
 		// There seems like no practical reason to check for errors
 		// at this point, if there are indeed errors we can simply
 		// just ignore such buckets and list only those which
@@ -266,7 +266,7 @@ func (fs fsObjects) ListBuckets() ([]BucketInfo, error) {
 		}
 		bucketInfos = append(bucketInfos, BucketInfo{
 			Name: fi.Name(),
-			// As osStat() doesnt carry CreatedTime, use ModTime() as CreatedTime.
+			// As os.Stat() doesnt carry CreatedTime, use ModTime() as CreatedTime.
 			Created: fi.ModTime(),
 		})
 	}
@@ -361,7 +361,12 @@ func (fs fsObjects) CopyObject(srcBucket, srcObject, dstBucket, dstObject string
 		pipeWriter.Close() // Close writer explicitly signalling we wrote all data.
 	}()
 
-	objInfo, err := fs.PutObject(dstBucket, dstObject, NewHashReader(pipeReader, length, metadata["etag"], ""), metadata)
+	hashReader, err := hash.NewReader(pipeReader, length, "", "")
+	if err != nil {
+		return oi, toObjectErr(err, dstBucket, dstObject)
+	}
+
+	objInfo, err := fs.PutObject(dstBucket, dstObject, hashReader, metadata)
 	if err != nil {
 		return oi, toObjectErr(err, dstBucket, dstObject)
 	}
@@ -379,7 +384,7 @@ func (fs fsObjects) CopyObject(srcBucket, srcObject, dstBucket, dstObject string
 // startOffset indicates the starting read location of the object.
 // length indicates the total length of the object.
 func (fs fsObjects) GetObject(bucket, object string, offset int64, length int64, writer io.Writer) (err error) {
-	if err = checkGetObjArgs(bucket, object); err != nil {
+	if err = checkBucketAndObjectNamesFS(bucket, object); err != nil {
 		return err
 	}
 
@@ -395,6 +400,12 @@ func (fs fsObjects) GetObject(bucket, object string, offset int64, length int64,
 	// Writer cannot be nil.
 	if writer == nil {
 		return toObjectErr(traceError(errUnexpected), bucket, object)
+	}
+
+	// If its a directory request, we return an empty body.
+	if hasSuffix(object, slashSeparator) {
+		_, err = writer.Write([]byte(""))
+		return toObjectErr(traceError(err), bucket, object)
 	}
 
 	if bucket != minioMetaBucket {
@@ -440,6 +451,15 @@ func (fs fsObjects) GetObject(bucket, object string, offset int64, length int64,
 // getObjectInfo - wrapper for reading object metadata and constructs ObjectInfo.
 func (fs fsObjects) getObjectInfo(bucket, object string) (oi ObjectInfo, e error) {
 	fsMeta := fsMetaV1{}
+	if hasSuffix(object, slashSeparator) {
+		// Directory call needs to arrive with object ending with "/".
+		fi, err := fsStatDir(pathJoin(fs.fsPath, bucket, object))
+		if err != nil {
+			return oi, toObjectErr(err, bucket, object)
+		}
+		return fsMeta.ToObjectInfo(bucket, object, fi), nil
+	}
+
 	fsMetaPath := pathJoin(fs.fsPath, minioMetaBucket, bucketMetaPrefix, bucket, object, fsMetaJSONFile)
 
 	// Read `fs.json` to perhaps contend with
@@ -472,9 +492,25 @@ func (fs fsObjects) getObjectInfo(bucket, object string) (oi ObjectInfo, e error
 	return fsMeta.ToObjectInfo(bucket, object, fi), nil
 }
 
+// Checks bucket and object name validity, returns nil if both are valid.
+func checkBucketAndObjectNamesFS(bucket, object string) error {
+	// Verify if bucket is valid.
+	if !IsValidBucketName(bucket) {
+		return traceError(BucketNameInvalid{Bucket: bucket})
+	}
+	// Verify if object is valid.
+	if len(object) == 0 {
+		return traceError(ObjectNameInvalid{Bucket: bucket, Object: object})
+	}
+	if !IsValidObjectPrefix(object) {
+		return traceError(ObjectNameInvalid{Bucket: bucket, Object: object})
+	}
+	return nil
+}
+
 // GetObjectInfo - reads object metadata and replies back ObjectInfo.
 func (fs fsObjects) GetObjectInfo(bucket, object string) (oi ObjectInfo, e error) {
-	if err := checkGetObjArgs(bucket, object); err != nil {
+	if err := checkBucketAndObjectNamesFS(bucket, object); err != nil {
 		return oi, err
 	}
 
@@ -509,13 +545,21 @@ func (fs fsObjects) parentDirIsObject(bucket, parent string) bool {
 // until EOF, writes data directly to configured filesystem path.
 // Additionally writes `fs.json` which carries the necessary metadata
 // for future object operations.
-func (fs fsObjects) PutObject(bucket string, object string, data *HashReader, metadata map[string]string) (objInfo ObjectInfo, retErr error) {
+func (fs fsObjects) PutObject(bucket string, object string, data *hash.Reader, metadata map[string]string) (objInfo ObjectInfo, retErr error) {
+	// No metadata is set, allocate a new one.
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+
 	var err error
 
 	// Validate if bucket name is valid and exists.
 	if _, err = fs.statBucketDir(bucket); err != nil {
 		return ObjectInfo{}, toObjectErr(err, bucket)
 	}
+
+	fsMeta := newFSMetaV1()
+	fsMeta.Meta = metadata
 
 	// This is a special case with size as '0' and object ends
 	// with a slash separator, we treat it like a valid operation
@@ -525,7 +569,14 @@ func (fs fsObjects) PutObject(bucket string, object string, data *HashReader, me
 		if fs.parentDirIsObject(bucket, path.Dir(object)) {
 			return ObjectInfo{}, toObjectErr(traceError(errFileAccessDenied), bucket, object)
 		}
-		return dirObjectInfo(bucket, object, data.Size(), metadata), nil
+		if err = fsMkdirAll(pathJoin(fs.fsPath, bucket, object)); err != nil {
+			return ObjectInfo{}, toObjectErr(err, bucket, object)
+		}
+		var fi os.FileInfo
+		if fi, err = fsStatDir(pathJoin(fs.fsPath, bucket, object)); err != nil {
+			return ObjectInfo{}, toObjectErr(err, bucket, object)
+		}
+		return fsMeta.ToObjectInfo(bucket, object, fi), nil
 	}
 
 	if err = checkPutObjectArgs(bucket, object, fs); err != nil {
@@ -537,13 +588,12 @@ func (fs fsObjects) PutObject(bucket string, object string, data *HashReader, me
 		return ObjectInfo{}, toObjectErr(traceError(errFileAccessDenied), bucket, object)
 	}
 
-	// No metadata is set, allocate a new one.
-	if metadata == nil {
-		metadata = make(map[string]string)
+	// Validate input data size and it can never be less than zero.
+	if data.Size() < 0 {
+		return ObjectInfo{}, traceError(errInvalidArgument)
 	}
 
-	fsMeta := newFSMetaV1()
-	fsMeta.Meta = metadata
+	metadata["etag"] = data.MD5HexString()
 
 	var wlk *lock.LockedFile
 	if bucket != minioMetaBucket {
@@ -574,6 +624,7 @@ func (fs fsObjects) PutObject(bucket string, object string, data *HashReader, me
 	if size := data.Size(); size > 0 && bufSize > size {
 		bufSize = size
 	}
+
 	buf := make([]byte, int(bufSize))
 	fsTmpObjPath := pathJoin(fs.fsPath, minioMetaTmpBucket, fs.fsUUID, tempObj)
 	bytesWritten, err := fsCreateFile(fsTmpObjPath, data, buf, data.Size())
@@ -594,12 +645,6 @@ func (fs fsObjects) PutObject(bucket string, object string, data *HashReader, me
 	// failure. If PutObject succeeds, then there would be
 	// nothing to delete.
 	defer fsRemoveFile(fsTmpObjPath)
-
-	if err = data.Verify(); err != nil { // verify MD5 and SHA256
-		return ObjectInfo{}, traceError(err)
-	}
-
-	metadata["etag"] = hex.EncodeToString(data.MD5())
 
 	// Entire object was written to the temp location, now it's safe to rename it to the actual location.
 	fsNSObjPath := pathJoin(fs.fsPath, bucket, object)
@@ -627,7 +672,7 @@ func (fs fsObjects) PutObject(bucket string, object string, data *HashReader, me
 // DeleteObject - deletes an object from a bucket, this operation is destructive
 // and there are no rollbacks supported.
 func (fs fsObjects) DeleteObject(bucket, object string) error {
-	if err := checkDelObjArgs(bucket, object); err != nil {
+	if err := checkBucketAndObjectNamesFS(bucket, object); err != nil {
 		return err
 	}
 
@@ -774,18 +819,30 @@ func (fs fsObjects) ListObjects(bucket, prefix, marker, delimiter string, maxKey
 
 	// Convert entry to ObjectInfo
 	entryToObjectInfo := func(entry string) (objInfo ObjectInfo, err error) {
-		if hasSuffix(entry, slashSeparator) {
-			// Object name needs to be full path.
-			objInfo.Name = entry
-			objInfo.IsDir = true
-			return
-		}
-
-		// Protect reading `fs.json`.
+		// Protect the entry from concurrent deletes, or renames.
 		objectLock := globalNSMutex.NewNSLock(bucket, entry)
 		if err = objectLock.GetRLock(globalListingTimeout); err != nil {
 			return ObjectInfo{}, err
 		}
+
+		if hasSuffix(entry, slashSeparator) {
+			var fi os.FileInfo
+			fi, err = fsStatDir(pathJoin(fs.fsPath, bucket, entry))
+			objectLock.RUnlock()
+			if err != nil {
+				return objInfo, err
+			}
+			// Success.
+			return ObjectInfo{
+				// Object name needs to be full path.
+				Name:    entry,
+				Bucket:  bucket,
+				Size:    fi.Size(),
+				ModTime: fi.ModTime(),
+				IsDir:   fi.IsDir(),
+			}, nil
+		}
+
 		var etag string
 		etag, err = fs.getObjectETag(bucket, entry)
 		objectLock.RUnlock()

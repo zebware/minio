@@ -20,7 +20,6 @@ import (
 	"bytes"
 	"encoding/hex"
 	"encoding/json"
-	"errors"
 	"reflect"
 	"strconv"
 	"testing"
@@ -341,8 +340,6 @@ func TestGetPartSizeFromIdx(t *testing.T) {
 		partIndex    int
 		expectedSize int64
 	}{
-		// Total size is - 1
-		{-1, 10, 1, -1},
 		// Total size is zero
 		{0, 10, 1, 0},
 		// part size 2MiB, total size 4MiB
@@ -357,7 +354,7 @@ func TestGetPartSizeFromIdx(t *testing.T) {
 	}
 
 	for i, testCase := range testCases {
-		s, err := getPartSizeFromIdx(testCase.totalSize, testCase.partSize, testCase.partIndex)
+		s, err := calculatePartSizeFromIdx(testCase.totalSize, testCase.partSize, testCase.partIndex)
 		if err != nil {
 			t.Errorf("Test %d: Expected to pass but failed. %s", i+1, err)
 		}
@@ -372,13 +369,16 @@ func TestGetPartSizeFromIdx(t *testing.T) {
 		partIndex int
 		err       error
 	}{
-		// partSize is 0, error.
+		// partSize is 0, returns error.
 		{10, 0, 1, errPartSizeZero},
+		// partIndex is 0, returns error.
 		{10, 1, 0, errPartSizeIndex},
+		// Total size is -1, returns error.
+		{-1, 10, 1, errInvalidArgument},
 	}
 
 	for i, testCaseFailure := range testCasesFailure {
-		_, err := getPartSizeFromIdx(testCaseFailure.totalSize, testCaseFailure.partSize, testCaseFailure.partIndex)
+		_, err := calculatePartSizeFromIdx(testCaseFailure.totalSize, testCaseFailure.partSize, testCaseFailure.partIndex)
 		if err == nil {
 			t.Errorf("Test %d: Expected to failed but passed. %s", i+1, err)
 		}
@@ -447,45 +447,4 @@ func TestEvalDisks(t *testing.T) {
 	defer removeRoots(disks)
 	xl := objLayer.(*xlObjects)
 	testShuffleDisks(t, xl)
-}
-
-func testEvalDisks(t *testing.T, xl *xlObjects) {
-	disks := xl.storageDisks
-
-	diskErr := errors.New("some disk error")
-	errs := []error{
-		diskErr, nil, nil, nil,
-		nil, diskErr, nil, nil,
-		diskErr, nil, nil, nil,
-		nil, nil, nil, diskErr,
-	}
-
-	// Test normal setup with some disks
-	// returning errors
-	newDisks := evalDisks(disks, errs)
-	if newDisks[0] != nil ||
-		newDisks[1] != disks[1] ||
-		newDisks[2] != disks[2] ||
-		newDisks[3] != disks[3] ||
-		newDisks[4] != disks[4] ||
-		newDisks[5] != nil ||
-		newDisks[6] != disks[6] ||
-		newDisks[7] != disks[7] ||
-		newDisks[8] != nil ||
-		newDisks[9] != disks[9] ||
-		newDisks[10] != disks[10] ||
-		newDisks[11] != disks[11] ||
-		newDisks[12] != disks[12] ||
-		newDisks[13] != disks[13] ||
-		newDisks[14] != disks[14] ||
-		newDisks[15] != nil {
-		t.Errorf("evalDisks returned incorrect new disk set.")
-	}
-
-	// Test when number of errs doesn't match with number of disks
-	errs = []error{nil, nil, nil, nil}
-	newDisks = evalDisks(disks, errs)
-	if newDisks != nil {
-		t.Errorf("evalDisks returned no nil slice")
-	}
 }

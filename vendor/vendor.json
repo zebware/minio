@@ -285,12 +285,6 @@
 			"revisionTime": "2016-08-31T22:25:20Z"
 		},
 		{
-			"checksumSHA1": "isRGvFzUCh72bNQFmw7WQaeT7xY=",
-			"path": "github.com/lox/httpcache",
-			"revision": "fff585cf25b80f4ccc4ac7be6d3f564aa9c117ff",
-			"revisionTime": "2017-01-09T03:46:36Z"
-		},
-		{
 			"path": "github.com/mattn/go-colorable",
 			"revision": "9056b7a9f2d1f2d96498d6d146acd1f9d5ed3d59",
 			"revisionTime": "2016-06-03T00:08:27+09:00"
@@ -302,10 +296,22 @@
 			"revisionTime": "2016-11-23T14:36:37Z"
 		},
 		{
-			"checksumSHA1": "4gphCNVXIjp5ytz3+S3SD3Dp948=",
-			"path": "github.com/minio/blake2b-simd",
-			"revision": "3f5f724cb5b182a5c278d6d3d55b40e7f8c2efb4",
-			"revisionTime": "2016-07-23T06:10:19Z"
+			"checksumSHA1": "1EiU/fWJI6ldCTGorUvijilegRM=",
+			"path": "github.com/minio/blazer/base",
+			"revision": "8e81ddf2d8deed54c6ac3f7d264d78659e72fbb8",
+			"revisionTime": "2017-10-06T21:06:28Z"
+		},
+		{
+			"checksumSHA1": "ucCxupZ1gyxvFsBg5igP13dySLI=",
+			"path": "github.com/minio/blazer/internal/b2types",
+			"revision": "8e81ddf2d8deed54c6ac3f7d264d78659e72fbb8",
+			"revisionTime": "2017-10-06T21:06:28Z"
+		},
+		{
+			"checksumSHA1": "zgBbPwwuUH2sxz8smOzOA9TrD5g=",
+			"path": "github.com/minio/blazer/internal/blog",
+			"revision": "8e81ddf2d8deed54c6ac3f7d264d78659e72fbb8",
+			"revisionTime": "2017-10-06T21:06:28Z"
 		},
 		{
 			"checksumSHA1": "fUWokilZyc1QDKnIgCDJE8n1S9U=",
@@ -336,10 +342,10 @@
 			"revisionTime": "2016-02-29T08:42:30-08:00"
 		},
 		{
-			"checksumSHA1": "mqxOM3CsubB09O0nDEe4efu0JLQ=",
+			"checksumSHA1": "EkdIh5Mk2bRiARtdoqUfnBuyndk=",
 			"path": "github.com/minio/minio-go",
-			"revision": "414c6b6a2e97428776cd831d9745589ebcf873e5",
-			"revisionTime": "2017-09-27T19:03:45Z"
+			"revision": "9690dc6c40e6ef271727848c04f974e801212ac1",
+			"revisionTime": "2017-10-02T19:34:27Z"
 		},
 		{
 			"checksumSHA1": "5juljGXPkBWENR2Os7dlnPQER48=",
@@ -435,12 +441,6 @@
 			"path": "github.com/pkg/profile",
 			"revision": "c78aac22bd43883fd2817833b982153dcac17b3b",
 			"revisionTime": "2016-05-18T16:56:57+10:00"
-		},
-		{
-			"checksumSHA1": "NLwKGa5B0STKAvQV+lz/ujnbzN4=",
-			"path": "github.com/rainycape/vfs",
-			"revision": "a62fd22bcf7010946a44f6a1250a82c03110a14b",
-			"revisionTime": "2015-06-11T13:38:00Z"
 		},
 		{
 			"path": "github.com/rs/cors",
@@ -572,24 +572,6 @@
 			"revisionTime": "2017-03-08T18:50:27Z"
 		},
 		{
-			"checksumSHA1": "ZQdHbB9VYCXwQ+9/CmZPhJv0+SM=",
-			"path": "golang.org/x/text/internal/gen",
-			"revision": "470f45bf29f4147d6fbd7dfd0a02a848e49f5bf4",
-			"revisionTime": "2017-04-25T18:31:26Z"
-		},
-		{
-			"checksumSHA1": "47nwiUyVBY2RKoEGXmCSvusY4Js=",
-			"path": "golang.org/x/text/internal/triegen",
-			"revision": "470f45bf29f4147d6fbd7dfd0a02a848e49f5bf4",
-			"revisionTime": "2017-04-25T18:31:26Z"
-		},
-		{
-			"checksumSHA1": "Yd5wMObzagIfCiKLpZbtBIrOUA4=",
-			"path": "golang.org/x/text/internal/ucd",
-			"revision": "470f45bf29f4147d6fbd7dfd0a02a848e49f5bf4",
-			"revisionTime": "2017-04-25T18:31:26Z"
-		},
-		{
 			"checksumSHA1": "faFDXp++cLjLBlvsr+izZ+go1WU=",
 			"path": "golang.org/x/text/secure/bidirule",
 			"revision": "470f45bf29f4147d6fbd7dfd0a02a848e49f5bf4",
@@ -608,20 +590,8 @@
 			"revisionTime": "2017-04-25T18:31:26Z"
 		},
 		{
-			"checksumSHA1": "ZbYsJjfj1rPbHN+0baD1rg09PXQ=",
-			"path": "golang.org/x/text/unicode/cldr",
-			"revision": "470f45bf29f4147d6fbd7dfd0a02a848e49f5bf4",
-			"revisionTime": "2017-04-25T18:31:26Z"
-		},
-		{
 			"checksumSHA1": "Anof4bt0AU+Sa3R8Rq0KBnlpbaQ=",
 			"path": "golang.org/x/text/unicode/norm",
-			"revision": "470f45bf29f4147d6fbd7dfd0a02a848e49f5bf4",
-			"revisionTime": "2017-04-25T18:31:26Z"
-		},
-		{
-			"checksumSHA1": "5R2IZ5umPfkD5QKt3pwrbIgmrDk=",
-			"path": "golang.org/x/text/unicode/rangetable",
 			"revision": "470f45bf29f4147d6fbd7dfd0a02a848e49f5bf4",
 			"revisionTime": "2017-04-25T18:31:26Z"
 		},
@@ -870,23 +840,6 @@
 			"path": "gopkg.in/Shopify/sarama.v1",
 			"revision": "bd61cae2be85fa6ff40eb23dcdd24567967ac2ae",
 			"revisionTime": "2016-08-30T13:25:53Z"
-		},
-		{
-			"path": "gopkg.in/check.v1",
-			"revision": "11d3bc7aa68e238947792f30573146a3231fc0f1",
-			"revisionTime": "2015-07-29T10:04:31+02:00"
-		},
-		{
-			"checksumSHA1": "lLdKOn9RPtFoTtPUNq5+sIInAiE=",
-			"path": "gopkg.in/olivere/elastic.v3/backoff",
-			"revision": "f7ae701daf3abe5dfb99f57b3f47738ec93c9c26",
-			"revisionTime": "2016-07-16T10:42:39Z"
-		},
-		{
-			"checksumSHA1": "XQg6xG6l15Ke43KolthYYnVDCYo=",
-			"path": "gopkg.in/olivere/elastic.v3/uritemplates",
-			"revision": "f7ae701daf3abe5dfb99f57b3f47738ec93c9c26",
-			"revisionTime": "2016-07-16T10:42:39Z"
 		},
 		{
 			"checksumSHA1": "ji4KugVW5dIfKLoFr1fE+3mT90A=",

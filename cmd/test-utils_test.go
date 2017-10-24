@@ -53,6 +53,7 @@ import (
 	"github.com/fatih/color"
 	router "github.com/gorilla/mux"
 	"github.com/minio/minio-go/pkg/s3signer"
+	"github.com/minio/minio/pkg/hash"
 )
 
 // Tests should initNSLock only once.
@@ -71,6 +72,86 @@ func init() {
 
 	// Quiet logging.
 	log.logger.Hooks = nil
+}
+
+// concurreny level for certain parallel tests.
+const testConcurrencyLevel = 10
+
+///
+/// Excerpts from @lsegal - https://github.com/aws/aws-sdk-js/issues/659#issuecomment-120477258
+///
+///  User-Agent:
+///
+///      This is ignored from signing because signing this causes problems with generating pre-signed URLs
+///      (that are executed by other agents) or when customers pass requests through proxies, which may
+///      modify the user-agent.
+///
+///  Content-Length:
+///
+///      This is ignored from signing because generating a pre-signed URL should not provide a content-length
+///      constraint, specifically when vending a S3 pre-signed PUT URL. The corollary to this is that when
+///      sending regular requests (non-pre-signed), the signature contains a checksum of the body, which
+///      implicitly validates the payload length (since changing the number of bytes would change the checksum)
+///      and therefore this header is not valuable in the signature.
+///
+///  Content-Type:
+///
+///      Signing this header causes quite a number of problems in browser environments, where browsers
+///      like to modify and normalize the content-type header in different ways. There is more information
+///      on this in https://github.com/aws/aws-sdk-js/issues/244. Avoiding this field simplifies logic
+///      and reduces the possibility of future bugs
+///
+///  Authorization:
+///
+///      Is skipped for obvious reasons
+///
+var ignoredHeaders = map[string]bool{
+	"Authorization":  true,
+	"Content-Type":   true,
+	"Content-Length": true,
+	"User-Agent":     true,
+}
+
+// Headers to ignore in streaming v4
+var ignoredStreamingHeaders = map[string]bool{
+	"Authorization": true,
+	"Content-Type":  true,
+	"Content-Md5":   true,
+	"User-Agent":    true,
+}
+
+// calculateSignedChunkLength - calculates the length of chunk metadata
+func calculateSignedChunkLength(chunkDataSize int64) int64 {
+	return int64(len(fmt.Sprintf("%x", chunkDataSize))) +
+		17 + // ";chunk-signature="
+		64 + // e.g. "f2ca1bb6c7e907d06dafe4687e579fce76b37e4e93b7605022da52e6ccc26fd2"
+		2 + // CRLF
+		chunkDataSize +
+		2 // CRLF
+}
+
+func mustGetHashReader(t TestErrHandler, data io.Reader, size int64, md5hex, sha256hex string) *hash.Reader {
+	hr, err := hash.NewReader(data, size, md5hex, sha256hex)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return hr
+}
+
+// calculateSignedChunkLength - calculates the length of the overall stream (data + metadata)
+func calculateStreamContentLength(dataLen, chunkSize int64) int64 {
+	if dataLen <= 0 {
+		return 0
+	}
+	chunksCount := int64(dataLen / chunkSize)
+	remainingBytes := int64(dataLen % chunkSize)
+	var streamLen int64
+	streamLen += chunksCount * calculateSignedChunkLength(chunkSize)
+	if remainingBytes > 0 {
+		streamLen += calculateSignedChunkLength(remainingBytes)
+	}
+	streamLen += calculateSignedChunkLength(0)
+	return streamLen
 }
 
 func prepareFS() (ObjectLayer, string, error) {
@@ -240,53 +321,6 @@ func UnstartedTestServer(t TestErrHandler, instanceType string) TestServer {
 // The generated certificate contains IP SAN, that way we don't need
 // to enable InsecureSkipVerify in TLS config
 
-var testServerCertPEM = []byte(`-----BEGIN CERTIFICATE-----
-MIIC9zCCAd+gAwIBAgIQV9ukx5ZahXeFygLXnR1WJTANBgkqhkiG9w0BAQsFADAS
-MRAwDgYDVQQKEwdBY21lIENvMB4XDTE2MTExNTE1MDQxNFoXDTE3MTExNTE1MDQx
-NFowEjEQMA4GA1UEChMHQWNtZSBDbzCCASIwDQYJKoZIhvcNAQEBBQADggEPADCC
-AQoCggEBALLDXunOVIipgtvPVpQxIBTzUpceUtLYrNKTCtYfLtvFCNSPAa2W2EAi
-mW2WgtU+Wd+jFN2leG+lvyEp2n1YzBN12oOzAZMf39K2j05aO6vN68Pf/3w/h2qz
-PDYFWbWBMS1vC6RosfaQc4VFZCkz89M1aonwj0K8FjOHG4pu7rKnVkluC0c4+Xpu
-8rB652chx/h6wFZwscVqFZIarTte8Z1tcbRhbvpdkOV749Wn5i2umlrKpBgsBv22
-8jn115BK7E2mN0rlCYPuN312bFFSSE85NaSdOp06TjD+2Rv9jPKizvnFN+2ADEje
-nlCaYe3VRybKPZLrxPcqFQoCQsO+8ZsCAwEAAaNJMEcwDgYDVR0PAQH/BAQDAgKk
-MBMGA1UdJQQMMAoGCCsGAQUFBwMBMA8GA1UdEwEB/wQFMAMBAf8wDwYDVR0RBAgw
-BocEfwAAATANBgkqhkiG9w0BAQsFAAOCAQEAsmNCixmx+srB93+Jz5t90zzCJN4O
-5RDWh7X7D54xtRRZ/t9HLLLFKW9EqhAM17xee3C4eNCicOqHP/htEvLwt3BWFmya
-djvIUQYfymx4GtBTfMH4eC5vYGdxSuTVNe7JGHMpJjArNe4vIlUHyj2n12aGDHUf
-NKEiTR2m+6hiKEyym74vhxGnl208OFa4tAMv3J7BjEObE37oy/vH/getE0HwG/EL
-feE4D2Pp9XqeMCg/sPZPoQgBuq3QsL2RdL8DQywb/HrApdLyfmN0avV5tmbrm0cL
-/0NUqCWjJIIKF0XxZbqlkQsYK5zpDJ36MFXO65aF3QGOMP1rlBD3d0S6kw==
------END CERTIFICATE-----`)
-
-var testServerKeyPEM = []byte(`-----BEGIN RSA PRIVATE KEY-----
-MIIEowIBAAKCAQEAssNe6c5UiKmC289WlDEgFPNSlx5S0tis0pMK1h8u28UI1I8B
-rZbYQCKZbZaC1T5Z36MU3aV4b6W/ISnafVjME3Xag7MBkx/f0raPTlo7q83rw9//
-fD+HarM8NgVZtYExLW8LpGix9pBzhUVkKTPz0zVqifCPQrwWM4cbim7usqdWSW4L
-Rzj5em7ysHrnZyHH+HrAVnCxxWoVkhqtO17xnW1xtGFu+l2Q5Xvj1afmLa6aWsqk
-GCwG/bbyOfXXkErsTaY3SuUJg+43fXZsUVJITzk1pJ06nTpOMP7ZG/2M8qLO+cU3
-7YAMSN6eUJph7dVHJso9kuvE9yoVCgJCw77xmwIDAQABAoIBAEE6CmLTd4LaHzZn
-RBcUibk7Q5KCbQQkLYM0Rgr1G9ry3RL6D0mwtb1JIqSa+6gldROl5NIvM2/Bkajf
-JasBAI3FPfM6GMP/KGMxW77iK823eGRjUkyavaWQOtMXRrF0r2X9k8jsrqrh8FTb
-if2CyF/zqKkmTo+yI4Ovs7viWFR1IFBUHRwfYTTKnXA2q4S39knExALe1wWUkc4L
-oOidewQ5IVCU3OQLWXP/beKoV/jw6+dOs5CYjXFsww6tdOsh+WkA9d3/rKPPtLdP
-tDQiZtmI6FCYy/PdYqmzY0xg6dipGTDRfENUEx5SJu6HeSoUQUwEpQqnRxIu0iZl
-FJ2ZziECgYEAzpdbIrFltGlSh7DIJfnQG86QeOw/nGluFTED9AweRAIzOYnUQCV3
-XCKMhFqmzsNpibEC1Cok92ZJk7bfsmPlx+qzL7BFpynA/gezxgc2wNZlWs8btPHi
-s9h8hwL5If1FgAMD4E2iJtNgI/Kn5j8SDo/A5hAP1CXv12JRTB+pzlECgYEA3YQ6
-e2MLQYLDIcD5RoCrXOc9qo/l46uzo5laIuCKtd/IoOlip95kdgzpQC0/eenDLV9y
-KLqAOZxZe+TVKtSOzVGy58FyD6L1oBJgfwuBku1x5ADRsIblq2uIOumDygRU0hMg
-0tM3orIFGLyJU5hv6vC0x1ZdIGit0wP4ULhgKisCgYARJs3BLps0BD5+13V2eawG
-cvrZnzuUv8gM6FncrBjjKo+YKlI91R54vsGNx3zr05tyfAixFqKlC4/2PIuL4vFT
-zK99uRO/Uh8cuAT73uNz1RjrFiDFwANDTSjhiKSoZr+bZiSvPaLFuGzV7zJzUi8s
-mFC6iQDXayLjbd00BbjyUQKBgHJD2R74sj+ywhFRR8S0brDXn5mx7LYKRfnoCvTe
-uu6iZw2KFhfdwhibBF7UeF/c048+ItcbjTUqj4Y3PjZ/usHymMSvprSmLOnLUPd3
-6fjufsdMHN5gV2ybZYRuHEtC/LX4o//ccGB+T964smXqxiB81ePViuhC1xd4fsi0
-svZNAoGBALJOOR8ebtgATqc6jpnFxdqNmlwzAf/dH/jMZ6FZrttqIWiwxKvWaWPK
-eHJtMmEPMustw/sv1GhDzwWmvgNFPzwEitPKW31m4EdbUCZFxPZ69/BtHTjXD3q3
-dP9W+omFXKQ36bVCB6xKmZH/ZVH5iQW0pdkD2JRnUPsDMNBeqmd6
------END RSA PRIVATE KEY-----`)
-
 // Starts the test server and returns the TestServer with TLS configured instance.
 func StartTestTLSServer(t TestErrHandler, instanceType string, cert, key []byte) TestServer {
 	// Fetch TLS key and pem files from test-data/ directory.
@@ -434,11 +468,6 @@ func resetGlobalNSLock() {
 	if globalNSMutex != nil {
 		globalNSMutex = nil
 	}
-}
-
-// reset global event notifier.
-func resetGlobalEventNotifier() {
-	globalEventNotifier = nil
 }
 
 // reset Global event notifier.
@@ -1409,13 +1438,6 @@ func getPutNotificationURL(endPoint, bucketName string) string {
 	return makeTestTargetURL(endPoint, bucketName, "", queryValue)
 }
 
-// return URL for fetching bucket notification.
-func getGetNotificationURL(endPoint, bucketName string) string {
-	queryValue := url.Values{}
-	queryValue.Set("notification", "")
-	return makeTestTargetURL(endPoint, bucketName, "", queryValue)
-}
-
 // return URL for inserting bucket policy.
 func getPutPolicyURL(endPoint, bucketName string) string {
 	queryValue := url.Values{}
@@ -1962,6 +1984,7 @@ func ExecObjectLayerTest(t TestErrHandler, objTest objTestType) {
 	if err != nil {
 		t.Fatalf("Initialization of object layer failed for single node setup: %s", err)
 	}
+
 	// Executing the object layer tests for single node setup.
 	objTest(objLayer, FSTestStr, t)
 
@@ -2357,4 +2380,25 @@ func randomizeBytes(s []byte, seed int64) []byte {
 		s[i], s[j] = s[j], s[i]
 	}
 	return s
+}
+
+func TestToErrIsNil(t *testing.T) {
+	if toObjectErr(nil) != nil {
+		t.Errorf("Test expected to return nil, failed instead got a non-nil value %s", toObjectErr(nil))
+	}
+	if toStorageErr(nil) != nil {
+		t.Errorf("Test expected to return nil, failed instead got a non-nil value %s", toStorageErr(nil))
+	}
+	if toAPIErrorCode(nil) != ErrNone {
+		t.Errorf("Test expected error code to be ErrNone, failed instead provided %d", toAPIErrorCode(nil))
+	}
+	if s3ToObjectError(nil) != nil {
+		t.Errorf("Test expected to return nil, failed instead got a non-nil value %s", s3ToObjectError(nil))
+	}
+	if azureToObjectError(nil) != nil {
+		t.Errorf("Test expected to return nil, failed instead got a non-nil value %s", azureToObjectError(nil))
+	}
+	if gcsToObjectError(nil) != nil {
+		t.Errorf("Test expected to return nil, failed instead got a non-nil value %s", gcsToObjectError(nil))
+	}
 }
