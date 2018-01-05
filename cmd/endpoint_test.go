@@ -36,7 +36,6 @@ func TestNewEndpoint(t *testing.T) {
 		expectedEndpoint Endpoint
 		expectedType     EndpointType
 		expectedErr      error
-		skipDocker       bool
 	}{
 		{"foo", Endpoint{URL: &url.URL{Path: "foo"}, IsLocal: true}, PathEndpointType, nil},
 		{"/foo", Endpoint{URL: &url.URL{Path: "/foo"}, IsLocal: true}, PathEndpointType, nil},

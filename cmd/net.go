@@ -86,20 +86,18 @@ func getHostIP4(host string) (ipList set.StringSet, err error) {
 		startTime := time.Now()
 		// wait for hosts to resolve in exponentialbackoff manner
 		for _ = range newRetryTimerSimple(doneCh) {
-			// Retry infinitely on Kubernetes and Docker swarm.
-			// This is needed as the remote hosts are sometime
-			// not available immediately.
 			if ips, err = net.LookupIP(host); err == nil {
 				break
 			}
 			// time elapsed
 			timeElapsed := time.Since(startTime)
 			// log error only if more than 1s elapsed
-			if timeElapsed > time.Second {
+			if timeElapsed > defaultRetryCap {
 				// log the message to console about the host not being
 				// resolveable.
 				errorIf(err, "Unable to resolve host %s (%s)", host,
 					humanize.RelTime(startTime, startTime.Add(timeElapsed), "elapsed", ""))
+				break
 			}
 		}
 	}
