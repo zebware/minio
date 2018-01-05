@@ -427,7 +427,7 @@ func TestParseSignV4(t *testing.T) {
 			validateCredentialfields(t, i+1, testCase.expectedAuthField.Credential, parsedAuthField.Credential)
 
 			// validating the extraction/parsing of signature field.
-			if testCase.expectedAuthField.Signature != parsedAuthField.Signature {
+			if !compareSignatureV4(testCase.expectedAuthField.Signature, parsedAuthField.Signature) {
 				t.Errorf("Test %d: Parsed Signature field mismatch: Expected \"%s\", got \"%s\"", i+1, testCase.expectedAuthField.Signature, parsedAuthField.Signature)
 			}
 
@@ -750,6 +750,30 @@ func TestParsePreSignV4(t *testing.T) {
 			},
 			expectedErrCode: ErrNone,
 		},
+
+		// Test case - 9.
+		// Test case with value greater than 604800 in X-Amz-Expires header.
+		{
+			inputQueryKeyVals: []string{
+				// valid  "X-Amz-Algorithm" header.
+				"X-Amz-Algorithm", signV4Algorithm,
+				// valid  "X-Amz-Credential" header.
+				"X-Amz-Credential", joinWithSlash(
+					"Z7IXGOO6BZ0REAN1Q26I",
+					sampleTimeStr,
+					"us-west-1",
+					"s3",
+					"aws4_request"),
+				// valid "X-Amz-Date" query.
+				"X-Amz-Date", queryTime.UTC().Format(iso8601Format),
+				// Invalid Expiry time greater than 7 days (604800 in seconds).
+				"X-Amz-Expires", getDurationStr(605000),
+				"X-Amz-Signature", "abcd",
+				"X-Amz-SignedHeaders", "host;x-amz-content-sha256;x-amz-date",
+			},
+			expectedPreSignValues: preSignValues{},
+			expectedErrCode:       ErrMaximumExpires,
+		},
 	}
 
 	for i, testCase := range testCases {
@@ -771,7 +795,7 @@ func TestParsePreSignV4(t *testing.T) {
 				t.Errorf("Test %d: Expected the result to be \"%v\", but got \"%v\". ", i+1, testCase.expectedPreSignValues.SignedHeaders, parsedPreSign.SignedHeaders)
 			}
 			// validating signature field.
-			if testCase.expectedPreSignValues.Signature != parsedPreSign.Signature {
+			if !compareSignatureV4(testCase.expectedPreSignValues.Signature, parsedPreSign.Signature) {
 				t.Errorf("Test %d: Signature field mismatch: Expected \"%s\", got \"%s\"", i+1, testCase.expectedPreSignValues.Signature, parsedPreSign.Signature)
 			}
 			// validating expiry duration.

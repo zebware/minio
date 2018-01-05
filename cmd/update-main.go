@@ -18,6 +18,9 @@ package cmd
 
 import (
 	"bufio"
+	"crypto"
+	_ "crypto/sha256" // Needed for sha256 hash verifier.
+	"encoding/hex"
 	"fmt"
 	"io/ioutil"
 	"net/http"
@@ -28,7 +31,9 @@ import (
 	"time"
 
 	"github.com/fatih/color"
+	"github.com/inconshreveable/go-update"
 	"github.com/minio/cli"
+	"github.com/segmentio/go-prompt"
 )
 
 // Check for new software updates.
@@ -53,18 +58,19 @@ FLAGS:
   {{end}}{{end}}
 EXIT STATUS:
    0 - You are already running the most recent version.
-   1 - New update is available.
+   1 - New update was applied successfully.
   -1 - Error in getting update information.
 
 EXAMPLES:
-   1. Check if there is a new update available:
-       $ {{.HelpName}}
+   1. Check and update minio:
+       $ {{.HelpName}
 `,
 }
 
 const (
 	minioReleaseTagTimeLayout = "2006-01-02T15-04-05Z"
-	minioReleaseURL           = "https://dl.minio.io/server/minio/release/" + runtime.GOOS + "-" + runtime.GOARCH + "/"
+	minioOSARCH               = runtime.GOOS + "-" + runtime.GOARCH
+	minioReleaseURL           = "https://dl.minio.io/server/minio/release/" + minioOSARCH + "/"
 )
 
 var (
@@ -169,6 +175,20 @@ func IsKubernetes() bool {
 	return os.Getenv("KUBERNETES_SERVICE_HOST") != ""
 }
 
+// IsBOSH returns true if minio is deployed from a bosh package
+func IsBOSH() bool {
+	// "/var/vcap/bosh" exists in BOSH deployed instance.
+	_, err := os.Stat("/var/vcap/bosh")
+	if os.IsNotExist(err) {
+		return false
+	}
+
+	// Log error, as we will not propagate it to caller
+	errorIf(err, "Error in BOSH check.")
+
+	return err == nil
+}
+
 // Minio Helm chart uses DownwardAPIFile to write pod label info to /podinfo/labels
 // More info: https://kubernetes.io/docs/tasks/inject-data-application/downward-api-volume-expose-pod-information/#store-pod-fields
 // Check if this is Helm package installation and report helm chart version
@@ -233,6 +253,9 @@ func getUserAgent(mode string) string {
 	if IsDocker() {
 		uaAppend("; ", "docker")
 	}
+	if IsBOSH() {
+		uaAppend("; ", "bosh")
+	}
 	if IsSourceBuild() {
 		uaAppend("; ", "source")
 	}
@@ -254,6 +277,11 @@ func getUserAgent(mode string) string {
 		if helmChartVersion != "" {
 			uaAppend(" Minio/helm-", helmChartVersion)
 		}
+	}
+
+	pcfTileVersion := os.Getenv("MINIO_PCF_TILE_VERSION")
+	if pcfTileVersion != "" {
+		uaAppend(" Minio/pcf-tile-", pcfTileVersion)
 	}
 
 	return strings.Join(userAgentParts, "")
@@ -313,23 +341,24 @@ func DownloadReleaseData(timeout time.Duration, mode string) (data string, err e
 // fbe246edbd382902db9a4035df7dce8cb441357d minio.RELEASE.2016-10-07T01-16-39Z
 //
 // The second word must be `minio.` appended to a standard release tag.
-func parseReleaseData(data string) (releaseTime time.Time, err error) {
+func parseReleaseData(data string) (sha256Hex string, releaseTime time.Time, err error) {
 	fields := strings.Fields(data)
 	if len(fields) != 2 {
 		err = fmt.Errorf("Unknown release data `%s`", data)
-		return releaseTime, err
+		return sha256Hex, releaseTime, err
 	}
 
+	sha256Hex = fields[0]
 	releaseInfo := fields[1]
 
 	fields = strings.SplitN(releaseInfo, ".", 2)
 	if len(fields) != 2 {
 		err = fmt.Errorf("Unknown release information `%s`", releaseInfo)
-		return releaseTime, err
+		return sha256Hex, releaseTime, err
 	}
 	if fields[0] != "minio" {
 		err = fmt.Errorf("Unknown release `%s`", releaseInfo)
-		return releaseTime, err
+		return sha256Hex, releaseTime, err
 	}
 
 	releaseTime, err = releaseTagToReleaseTime(fields[1])
@@ -337,13 +366,13 @@ func parseReleaseData(data string) (releaseTime time.Time, err error) {
 		err = fmt.Errorf("Unknown release tag format. %s", err)
 	}
 
-	return releaseTime, err
+	return sha256Hex, releaseTime, err
 }
 
-func getLatestReleaseTime(timeout time.Duration, mode string) (releaseTime time.Time, err error) {
+func getLatestReleaseTime(timeout time.Duration, mode string) (sha256Hex string, releaseTime time.Time, err error) {
 	data, err := DownloadReleaseData(timeout, mode)
 	if err != nil {
-		return releaseTime, err
+		return sha256Hex, releaseTime, err
 	}
 
 	return parseReleaseData(data)
@@ -384,30 +413,75 @@ func getDownloadURL(releaseTag string) (downloadURL string) {
 	return minioReleaseURL + "minio"
 }
 
-func getUpdateInfo(timeout time.Duration, mode string) (older time.Duration, downloadURL string, err error) {
-	var currentReleaseTime, latestReleaseTime time.Time
+func getUpdateInfo(timeout time.Duration, mode string) (updateMsg string, sha256Hex string, currentReleaseTime, latestReleaseTime time.Time, err error) {
 	currentReleaseTime, err = GetCurrentReleaseTime()
 	if err != nil {
-		return older, downloadURL, err
+		return updateMsg, sha256Hex, currentReleaseTime, latestReleaseTime, err
 	}
 
-	latestReleaseTime, err = getLatestReleaseTime(timeout, mode)
+	sha256Hex, latestReleaseTime, err = getLatestReleaseTime(timeout, mode)
 	if err != nil {
-		return older, downloadURL, err
+		return updateMsg, sha256Hex, currentReleaseTime, latestReleaseTime, err
 	}
 
+	var older time.Duration
+	var downloadURL string
 	if latestReleaseTime.After(currentReleaseTime) {
 		older = latestReleaseTime.Sub(currentReleaseTime)
 		downloadURL = getDownloadURL(releaseTimeToReleaseTag(latestReleaseTime))
 	}
 
-	return older, downloadURL, nil
+	return prepareUpdateMessage(downloadURL, older), sha256Hex, currentReleaseTime, latestReleaseTime, nil
 }
 
-func mainUpdate(ctx *cli.Context) {
+func doUpdate(sha256Hex string, latestReleaseTime time.Time, ok bool) (successMsg string, err error) {
+	if !ok {
+		successMsg = greenColorSprintf("Minio update to version RELEASE.%s cancelled.",
+			latestReleaseTime.Format(minioReleaseTagTimeLayout))
+		return successMsg, nil
+	}
+	var sha256Sum []byte
+	sha256Sum, err = hex.DecodeString(sha256Hex)
+	if err != nil {
+		return successMsg, err
+	}
+
+	resp, err := http.Get(getDownloadURL(releaseTimeToReleaseTag(latestReleaseTime)))
+	if err != nil {
+		return successMsg, err
+	}
+	defer resp.Body.Close()
+
+	// FIXME: add support for gpg verification as well.
+	if err = update.RollbackError(update.Apply(resp.Body,
+		update.Options{
+			Hash:     crypto.SHA256,
+			Checksum: sha256Sum,
+		},
+	)); err != nil {
+		return successMsg, err
+	}
+
+	return greenColorSprintf("Minio updated to version RELEASE.%s successfully.",
+		latestReleaseTime.Format(minioReleaseTagTimeLayout)), nil
+}
+
+func shouldUpdate(quiet bool, sha256Hex string, latestReleaseTime time.Time) (ok bool) {
+	ok = true
+	if !quiet {
+		ok = prompt.Confirm(greenColorSprintf("Update to RELEASE.%s [%s]", latestReleaseTime.Format(minioReleaseTagTimeLayout), "yes"))
+	}
+	return ok
+}
+
+var greenColorSprintf = color.New(color.FgGreen, color.Bold).SprintfFunc()
+
+func mainUpdate(ctx *cli.Context) error {
 	if len(ctx.Args()) != 0 {
 		cli.ShowCommandHelpAndExit(ctx, "update", -1)
 	}
+
+	handleCommonEnvVars()
 
 	quiet := ctx.Bool("quiet") || ctx.GlobalBool("quiet")
 	if quiet {
@@ -415,18 +489,29 @@ func mainUpdate(ctx *cli.Context) {
 	}
 
 	minioMode := ""
-	older, downloadURL, err := getUpdateInfo(10*time.Second, minioMode)
+	updateMsg, sha256Hex, _, latestReleaseTime, err := getUpdateInfo(10*time.Second, minioMode)
 	if err != nil {
 		log.Println(err)
 		os.Exit(-1)
 	}
 
-	if updateMsg := computeUpdateMessage(downloadURL, older); updateMsg != "" {
-		log.Println(updateMsg)
-		os.Exit(1)
+	// Nothing to update running the latest release.
+	if updateMsg == "" {
+		log.Println(greenColorSprintf("You are already running the most recent version of ‘minio’."))
+		return nil
 	}
 
-	colorSprintf := color.New(color.FgGreen, color.Bold).SprintfFunc()
-	log.Println(colorSprintf("You are already running the most recent version of ‘minio’."))
-	os.Exit(0)
+	log.Println(updateMsg)
+	// if the in-place update is disabled then we shouldn't ask the
+	// user to update the binaries.
+	if strings.Contains(updateMsg, minioReleaseURL) && !globalInplaceUpdateDisabled {
+		var successMsg string
+		successMsg, err = doUpdate(sha256Hex, latestReleaseTime, shouldUpdate(quiet, sha256Hex, latestReleaseTime))
+		if err != nil {
+			log.Println(err)
+			os.Exit(-1)
+		}
+		log.Println(successMsg)
+	}
+	return nil
 }

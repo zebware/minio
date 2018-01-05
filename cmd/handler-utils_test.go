@@ -25,6 +25,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/minio/minio/pkg/errors"
 )
 
 // Tests validate bucket LocationConstraint.
@@ -75,7 +77,7 @@ func TestIsValidLocationContraint(t *testing.T) {
 		if e != nil {
 			t.Fatalf("Test %d: Failed to Marshal bucket configuration", i+1)
 		}
-		serverConfig.SetRegion(testCase.serverConfigRegion)
+		globalServerConfig.SetRegion(testCase.serverConfigRegion)
 		_, actualCode := parseLocationConstraint(inputRequest)
 		if testCase.expectedCode != actualCode {
 			t.Errorf("Test %d: Expected the APIErrCode to be %d, but instead found %d", i+1, testCase.expectedCode, actualCode)
@@ -114,7 +116,7 @@ func TestValidateFormFieldSize(t *testing.T) {
 	for i, testCase := range testCases {
 		err := validateFormFieldSize(testCase.header)
 		if err != nil {
-			if errorCause(err).Error() != testCase.err.Error() {
+			if errors.Cause(err).Error() != testCase.err.Error() {
 				t.Errorf("Test %d: Expected error %s, got %s", i+1, testCase.err, err)
 			}
 		}
@@ -187,6 +189,29 @@ func TestExtractMetadataHeaders(t *testing.T) {
 		}
 		if err == nil && !reflect.DeepEqual(metadata, testCase.metadata) {
 			t.Fatalf("Test %d failed: Expected \"%#v\", got \"%#v\"", i+1, testCase.metadata, metadata)
+		}
+	}
+}
+
+// Test getResource()
+func TestGetResource(t *testing.T) {
+	testCases := []struct {
+		p                string
+		host             string
+		domain           string
+		expectedResource string
+	}{
+		{"/a/b/c", "test.mydomain.com", "mydomain.com", "/test/a/b/c"},
+		{"/a/b/c", "test.mydomain.com", "notmydomain.com", "/a/b/c"},
+		{"/a/b/c", "test.mydomain.com", "", "/a/b/c"},
+	}
+	for i, test := range testCases {
+		gotResource, err := getResource(test.p, test.host, test.domain)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if gotResource != test.expectedResource {
+			t.Fatalf("test %d: expected %s got %s", i+1, test.expectedResource, gotResource)
 		}
 	}
 }

@@ -20,6 +20,8 @@ import (
 	"fmt"
 	"hash"
 	"strings"
+
+	"github.com/minio/minio/pkg/errors"
 )
 
 // HealFile tries to reconstruct an erasure-coded file spread over all
@@ -48,7 +50,7 @@ func (s ErasureStorage) HealFile(staleDisks []StorageAPI, volume, path string, b
 	f ErasureFileInfo, err error) {
 
 	if !alg.Available() {
-		return f, traceError(errBitrotHashAlgoInvalid)
+		return f, errors.Trace(errBitrotHashAlgoInvalid)
 	}
 
 	// Initialization
@@ -76,12 +78,14 @@ func (s ErasureStorage) HealFile(staleDisks []StorageAPI, volume, path string, b
 		blocks[i] = make([]byte, chunksize)
 	}
 	var chunkOffset, blockOffset int64
-	for ; blockOffset < size; blockOffset += blocksize {
+
+	// The for loop below is entered when size == 0 and
+	// blockOffset == 0 to allow for reconstructing empty files.
+	for ; blockOffset == 0 || blockOffset < size; blockOffset += blocksize {
 		// last iteration may have less than blocksize data
 		// left, so chunksize needs to be recomputed.
 		if size < blockOffset+blocksize {
-			blocksize = size - blockOffset
-			chunksize = getChunkSize(blocksize, s.dataBlocks)
+			chunksize = getChunkSize(size-blockOffset, s.dataBlocks)
 			for i := range blocks {
 				blocks[i] = blocks[i][:chunksize]
 			}
@@ -119,9 +123,13 @@ func (s ErasureStorage) HealFile(staleDisks []StorageAPI, volume, path string, b
 		// iteration
 		chunkOffset += chunksize
 
-		// reconstruct data - this computes all data and parity shards
-		if err = s.ErasureDecodeDataAndParityBlocks(blocks); err != nil {
-			return f, err
+		// reconstruct data - this computes all data and
+		// parity shards - but we skip this step if we are
+		// reconstructing an empty file.
+		if chunksize > 0 {
+			if err = s.ErasureDecodeDataAndParityBlocks(blocks); err != nil {
+				return f, err
+			}
 		}
 
 		// write computed shards as chunks on file in each
@@ -144,7 +152,7 @@ func (s ErasureStorage) HealFile(staleDisks []StorageAPI, volume, path string, b
 		// If all disks had write errors we quit.
 		if !writeSucceeded {
 			// build error from all write errors
-			return f, traceError(joinWriteErrors(writeErrors))
+			return f, errors.Trace(joinWriteErrors(writeErrors))
 		}
 	}
 

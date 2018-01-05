@@ -1,5 +1,6 @@
 /*
- * Minio Go Library for Amazon S3 Compatible Cloud Storage (C) 2015, 2016 Minio, Inc.
+ * Minio Go Library for Amazon S3 Compatible Cloud Storage
+ * Copyright 2015-2017 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +25,6 @@ import (
 	"net/http"
 	"runtime/debug"
 	"sort"
-	"strings"
 
 	"github.com/minio/minio-go/pkg/encrypt"
 	"github.com/minio/minio-go/pkg/s3utils"
@@ -40,6 +40,7 @@ type PutObjectOptions struct {
 	CacheControl       string
 	EncryptMaterials   encrypt.Materials
 	NumThreads         uint
+	StorageClass       string
 }
 
 // getNumThreads - gets the number of threads to be used in the multipart
@@ -77,8 +78,11 @@ func (opts PutObjectOptions) Header() (header http.Header) {
 		header[amzHeaderKey] = []string{opts.EncryptMaterials.GetKey()}
 		header[amzHeaderMatDesc] = []string{opts.EncryptMaterials.GetDesc()}
 	}
+	if opts.StorageClass != "" {
+		header[amzStorageClass] = []string{opts.StorageClass}
+	}
 	for k, v := range opts.UserMetadata {
-		if !strings.HasPrefix(strings.ToLower(k), "x-amz-meta-") && !isStandardHeader(k) {
+		if !isAmzHeader(k) && !isStandardHeader(k) && !isSSEHeader(k) && !isStorageClassHeader(k) {
 			header["X-Amz-Meta-"+k] = []string{v}
 		} else {
 			header[k] = []string{v}
@@ -91,8 +95,8 @@ func (opts PutObjectOptions) Header() (header http.Header) {
 // encryption headers and raises an error if so.
 func (opts PutObjectOptions) validate() (err error) {
 	for k := range opts.UserMetadata {
-		if isStandardHeader(k) || isCSEHeader(k) {
-			return ErrInvalidArgument(k + " unsupported request parameter for user defined metadata")
+		if isStandardHeader(k) || isCSEHeader(k) || isStorageClassHeader(k) {
+			return ErrInvalidArgument(k + " unsupported request parameter for user defined metadata from minio-go")
 		}
 	}
 	return nil
@@ -209,7 +213,7 @@ func (c Client) putObjectMultipartStreamNoLength(ctx context.Context, bucketName
 		// Proceed to upload the part.
 		var objPart ObjectPart
 		objPart, err = c.uploadPart(ctx, bucketName, objectName, uploadID, rd, partNumber,
-			nil, nil, int64(length), opts.UserMetadata)
+			"", "", int64(length), opts.UserMetadata)
 		if err != nil {
 			return totalUploadedSize, err
 		}

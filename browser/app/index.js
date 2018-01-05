@@ -41,6 +41,8 @@ import _Login from './js/components/Login.js'
 import _Browse from './js/components/Browse.js'
 import fontAwesome from 'font-awesome/css/font-awesome.css'
 
+import MaterialDesignIconicFonts from 'material-design-iconic-font/dist/css/material-design-iconic-font.min.css'
+
 import Web from './js/web'
 window.Web = Web
 
@@ -81,7 +83,7 @@ ReactDOM.render((
   <Provider store={ store } web={ web }>
     <Router history={ browserHistory }>
       <Route path='/' component={ App }>
-        <Route path='minio' component={ App }>
+        <Route path={ minioBrowserPrefix } component={ App }>
           <IndexRoute component={ Browse } onEnter={ authNeeded } />
           <Route path='login' component={ Login } onEnter={ authNotNeeded } />
           <Route path=':bucket' component={ Browse } onEnter={ authNeeded } />

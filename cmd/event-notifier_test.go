@@ -23,6 +23,8 @@ import (
 	"reflect"
 	"testing"
 	"time"
+
+	"github.com/minio/minio/pkg/errors"
 )
 
 // Test InitEventNotifier with faulty disks
@@ -71,7 +73,7 @@ func TestInitEventNotifierFaultyDisks(t *testing.T) {
 	}
 	// Test initEventNotifier() with faulty disks
 	for i := 1; i <= 3; i++ {
-		if err := initEventNotifier(xl); errorCause(err) != errFaultyDisk {
+		if err := initEventNotifier(xl); errors.Cause(err) != errFaultyDisk {
 			t.Fatal("Unexpected error:", err)
 		}
 	}
@@ -98,7 +100,7 @@ func TestInitEventNotifierWithPostgreSQL(t *testing.T) {
 		t.Fatal("Unable to initialize FS backend.", err)
 	}
 
-	serverConfig.Notify.SetPostgreSQLByID("1", postgreSQLNotify{Enable: true})
+	globalServerConfig.Notify.SetPostgreSQLByID("1", postgreSQLNotify{Enable: true})
 	if err := initEventNotifier(fs); err == nil {
 		t.Fatal("PostgreSQL config didn't fail.")
 	}
@@ -125,7 +127,7 @@ func TestInitEventNotifierWithNATS(t *testing.T) {
 		t.Fatal("Unable to initialize FS backend.", err)
 	}
 
-	serverConfig.Notify.SetNATSByID("1", natsNotify{Enable: true})
+	globalServerConfig.Notify.SetNATSByID("1", natsNotify{Enable: true})
 	if err := initEventNotifier(fs); err == nil {
 		t.Fatal("NATS config didn't fail.")
 	}
@@ -152,7 +154,7 @@ func TestInitEventNotifierWithWebHook(t *testing.T) {
 		t.Fatal("Unable to initialize FS backend.", err)
 	}
 
-	serverConfig.Notify.SetWebhookByID("1", webhookNotify{Enable: true})
+	globalServerConfig.Notify.SetWebhookByID("1", webhookNotify{Enable: true})
 	if err := initEventNotifier(fs); err == nil {
 		t.Fatal("WebHook config didn't fail.")
 	}
@@ -179,7 +181,7 @@ func TestInitEventNotifierWithAMQP(t *testing.T) {
 		t.Fatal("Unable to initialize FS backend.", err)
 	}
 
-	serverConfig.Notify.SetAMQPByID("1", amqpNotify{Enable: true})
+	globalServerConfig.Notify.SetAMQPByID("1", amqpNotify{Enable: true})
 	if err := initEventNotifier(fs); err == nil {
 		t.Fatal("AMQP config didn't fail.")
 	}
@@ -206,7 +208,7 @@ func TestInitEventNotifierWithElasticSearch(t *testing.T) {
 		t.Fatal("Unable to initialize FS backend.", err)
 	}
 
-	serverConfig.Notify.SetElasticSearchByID("1", elasticSearchNotify{Enable: true})
+	globalServerConfig.Notify.SetElasticSearchByID("1", elasticSearchNotify{Enable: true})
 	if err := initEventNotifier(fs); err == nil {
 		t.Fatal("ElasticSearch config didn't fail.")
 	}
@@ -233,7 +235,7 @@ func TestInitEventNotifierWithRedis(t *testing.T) {
 		t.Fatal("Unable to initialize FS backend.", err)
 	}
 
-	serverConfig.Notify.SetRedisByID("1", redisNotify{Enable: true})
+	globalServerConfig.Notify.SetRedisByID("1", redisNotify{Enable: true})
 	if err := initEventNotifier(fs); err == nil {
 		t.Fatal("Redis config didn't fail.")
 	}
@@ -415,7 +417,7 @@ func TestListenBucketNotification(t *testing.T) {
 
 	listenARN := fmt.Sprintf("%s:%s:1:%s-%s",
 		minioTopic,
-		serverConfig.GetRegion(),
+		globalServerConfig.GetRegion(),
 		snsTypeMinio,
 		s.testServer.Server.Listener.Addr(),
 	)
@@ -462,11 +464,9 @@ func TestListenBucketNotification(t *testing.T) {
 	}
 
 	// Create a new notification event channel.
-	nEventCh := make(chan []NotificationEvent)
-	// Close the listener channel.
-	defer close(nEventCh)
+	nListenCh := newListenChan()
 	// Add events channel for listener.
-	if err := globalEventNotifier.AddListenerChan(listenARN, nEventCh); err != nil {
+	if err := globalEventNotifier.AddListenerChan(listenARN, nListenCh); err != nil {
 		t.Fatalf("Test Setup error: %v", err)
 	}
 	// Remove listen channel after the writer has closed or the
@@ -489,7 +489,7 @@ func TestListenBucketNotification(t *testing.T) {
 	// Wait for the event notification here, if nothing is received within 30 seconds,
 	// test error will be fired
 	select {
-	case n := <-nEventCh:
+	case n := <-nListenCh.dataCh:
 		// Check that received event
 		if len(n) == 0 {
 			t.Fatal("Unexpected error occurred")
@@ -497,9 +497,7 @@ func TestListenBucketNotification(t *testing.T) {
 		if n[0].S3.Object.Key != objectName {
 			t.Fatalf("Received wrong object name in notification, expected %s, received %s", n[0].S3.Object.Key, objectName)
 		}
-		break
 	case <-time.After(3 * time.Second):
-		break
 	}
 
 }
@@ -527,7 +525,7 @@ func TestAddRemoveBucketListenerConfig(t *testing.T) {
 	accountID := fmt.Sprintf("%d", UTCNow().UnixNano())
 	accountARN := fmt.Sprintf(
 		"arn:minio:sqs:%s:%s:listen-%s",
-		serverConfig.GetRegion(),
+		globalServerConfig.GetRegion(),
 		accountID,
 		globalMinioAddr,
 	)

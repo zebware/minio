@@ -22,6 +22,7 @@ import (
 	"net/url"
 	"path"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -64,18 +65,9 @@ func (endpoint Endpoint) Type() EndpointType {
 	return URLEndpointType
 }
 
-// SetHTTPS - sets secure http for URLEndpointType.
-func (endpoint Endpoint) SetHTTPS() {
-	if endpoint.Host != "" {
-		endpoint.Scheme = "https"
-	}
-}
-
-// SetHTTP - sets insecure http for URLEndpointType.
-func (endpoint Endpoint) SetHTTP() {
-	if endpoint.Host != "" {
-		endpoint.Scheme = "http"
-	}
+// IsHTTPS - returns true if secure for URLEndpointType.
+func (endpoint Endpoint) IsHTTPS() bool {
+	return endpoint.Scheme == "https"
 }
 
 // NewEndpoint - returns new endpoint based on given arguments.
@@ -130,6 +122,26 @@ func NewEndpoint(arg string) (ep Endpoint, e error) {
 			return ep, fmt.Errorf("empty or root path is not supported in URL endpoint")
 		}
 
+		// On windows having a preceding "/" will cause problems, if the
+		// command line already has C:/<export-folder/ in it. Final resulting
+		// path on windows might become C:/C:/ this will cause problems
+		// of starting minio server properly in distributed mode on windows.
+		// As a special case make sure to trim the separator.
+
+		// NOTE: It is also perfectly fine for windows users to have a path
+		// without C:/ since at that point we treat it as relative path
+		// and obtain the full filesystem path as well. Providing C:/
+		// style is necessary to provide paths other than C:/,
+		// such as F:/, D:/ etc.
+		//
+		// Another additional benefit here is that this style also
+		// supports providing \\host\share support as well.
+		if runtime.GOOS == globalWindowsOSName {
+			if filepath.VolumeName(u.Path[1:]) != "" {
+				u.Path = u.Path[1:]
+			}
+		}
+
 		isLocal, err = isLocalHost(host)
 		if err != nil {
 			return ep, err
@@ -169,18 +181,9 @@ func (endpoints EndpointList) Less(i, j int) bool {
 	return endpoints[i].String() < endpoints[j].String()
 }
 
-// SetHTTPS - sets secure http for URLEndpointType.
-func (endpoints EndpointList) SetHTTPS() {
-	for i := range endpoints {
-		endpoints[i].SetHTTPS()
-	}
-}
-
-// SetHTTP - sets insecure http for URLEndpointType.
-func (endpoints EndpointList) SetHTTP() {
-	for i := range endpoints {
-		endpoints[i].SetHTTP()
-	}
+// IsHTTPS - returns true if secure for URLEndpointType.
+func (endpoints EndpointList) IsHTTPS() bool {
+	return endpoints[0].IsHTTPS()
 }
 
 // NewEndpointList - returns new endpoint list based on input args.

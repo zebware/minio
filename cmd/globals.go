@@ -25,6 +25,7 @@ import (
 
 	humanize "github.com/dustin/go-humanize"
 	"github.com/fatih/color"
+	"github.com/minio/minio/pkg/auth"
 	miniohttp "github.com/minio/minio/pkg/http"
 )
 
@@ -50,13 +51,7 @@ const (
 	globalMinioModeFS              = "mode-server-fs"
 	globalMinioModeXL              = "mode-server-xl"
 	globalMinioModeDistXL          = "mode-server-distributed-xl"
-	globalMinioModeGatewayAzure    = "mode-gateway-azure"
-	globalMinioModeGatewayS3       = "mode-gateway-s3"
-	globalMinioModeGatewayGCS      = "mode-gateway-gcs"
-	globalMinioModeGatewayB2       = "mode-gateway-b2"
-
-	// globalMinioSysTmp prefix is used in Azure/GCS gateway for save metadata sent by Initialize Multipart Upload API.
-	globalMinioSysTmp = "minio.sys.tmp/"
+	globalMinioModeGatewayPrefix   = "mode-gateway-"
 
 	// Add new global values here.
 )
@@ -94,8 +89,11 @@ var (
 	// Set to true if credentials were passed from env, default is false.
 	globalIsEnvCreds = false
 
-	// This flag is set to 'true' wen MINIO_REGION env is set.
+	// This flag is set to 'true' when MINIO_REGION env is set.
 	globalIsEnvRegion = false
+
+	// This flag is set to 'true' when MINIO_UPDATE env is set to 'off'. Default is false.
+	globalInplaceUpdateDisabled = false
 
 	// This flag is set to 'us-east-1' by default
 	globalServerRegion = globalMinioDefaultRegion
@@ -125,6 +123,9 @@ var (
 	globalHTTPServerErrorCh = make(chan error)
 	globalOSSignalCh        = make(chan os.Signal, 1)
 
+	// Enable HTTP request/response headers and body logging.
+	globalHTTPTrace bool
+
 	// List of admin peers.
 	globalAdminPeers = adminPeers{}
 
@@ -142,10 +143,12 @@ var (
 	// Time when object layer was initialized on start up.
 	globalBootTime time.Time
 
-	globalActiveCred         credential
+	globalActiveCred         auth.Credentials
 	globalPublicCerts        []*x509.Certificate
 	globalXLObjCacheDisabled bool
-	// Add new variable global values here.
+
+	globalIsEnvDomainName bool
+	globalDomainName      string // Root domain for virtual host style requests
 
 	globalListingTimeout   = newDynamicTimeout( /*30*/ 600*time.Second /*5*/, 600*time.Second) // timeout for listing related ops
 	globalObjectTimeout    = newDynamicTimeout( /*1*/ 10*time.Minute /*10*/, 600*time.Second)  // timeout for Object API related ops
@@ -154,6 +157,16 @@ var (
 
 	// Keep connection active for clients actively using ListenBucketNotification.
 	globalSNSConnAlive = 5 * time.Second // Send a whitespace every 5 seconds.
+
+	// Storage classes
+	// Set to indicate if storage class is set up
+	globalIsStorageClass bool
+	// Set to store reduced redundancy storage class
+	globalRRStorageClass storageClass
+	// Set to store standard storage class
+	globalStandardStorageClass storageClass
+
+	// Add new variable global values here.
 )
 
 // global colors.

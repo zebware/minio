@@ -17,65 +17,18 @@
 package cmd
 
 import (
-	"errors"
 	"fmt"
 	"io/ioutil"
 	"path"
 	"runtime"
 	"strings"
-	"sync"
 
 	"github.com/Sirupsen/logrus"
 	"github.com/minio/mc/pkg/console"
+	"github.com/minio/minio/pkg/errors"
 )
 
 var log = NewLogger()
-
-type loggers struct {
-	sync.RWMutex
-	Console ConsoleLogger `json:"console"`
-	File    FileLogger    `json:"file"`
-}
-
-// Validate - Check whether loggers are valid or not.
-func (l *loggers) Validate() (err error) {
-	if l != nil {
-		fileLogger := l.GetFile()
-		if fileLogger.Enable && fileLogger.Filename == "" {
-			err = errors.New("Missing filename for enabled file logger")
-		}
-	}
-
-	return err
-}
-
-// SetFile set new file logger.
-func (l *loggers) SetFile(flogger FileLogger) {
-	l.Lock()
-	defer l.Unlock()
-	l.File = flogger
-}
-
-// GetFileLogger get current file logger.
-func (l *loggers) GetFile() FileLogger {
-	l.RLock()
-	defer l.RUnlock()
-	return l.File
-}
-
-// SetConsole set new console logger.
-func (l *loggers) SetConsole(clogger ConsoleLogger) {
-	l.Lock()
-	defer l.Unlock()
-	l.Console = clogger
-}
-
-// GetConsole get current console logger.
-func (l *loggers) GetConsole() ConsoleLogger {
-	l.RLock()
-	defer l.RUnlock()
-	return l.Console
-}
 
 // LogTarget - interface for log target.
 type LogTarget interface {
@@ -186,7 +139,7 @@ func getSource() string {
 
 func logIf(level logrus.Level, source string, err error, msg string, data ...interface{}) {
 	isErrIgnored := func(err error) (ok bool) {
-		err = errorCause(err)
+		err = errors.Cause(err)
 		switch err.(type) {
 		case BucketNotFound, BucketNotEmpty, BucketExists:
 			ok = true
@@ -207,8 +160,8 @@ func logIf(level logrus.Level, source string, err error, msg string, data ...int
 		"cause":  err.Error(),
 	}
 
-	if terr, ok := err.(*Error); ok {
-		fields["stack"] = strings.Join(terr.Trace(), " ")
+	if terr, ok := err.(*errors.Error); ok {
+		fields["stack"] = strings.Join(terr.Stack(), " ")
 	}
 
 	switch level {

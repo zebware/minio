@@ -22,6 +22,8 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+
+	"github.com/minio/minio/pkg/errors"
 )
 
 // Tests healing of format XL.
@@ -289,7 +291,7 @@ func TestUndoMakeBucket(t *testing.T) {
 	// Validate if bucket was deleted properly.
 	_, err = obj.GetBucketInfo(bucketName)
 	if err != nil {
-		err = errorCause(err)
+		err = errors.Cause(err)
 		switch err.(type) {
 		case BucketNotFound:
 		default:
@@ -331,8 +333,12 @@ func TestQuickHeal(t *testing.T) {
 		}
 	}
 
+	// figure out read and write quorum
+	readQuorum := len(xl.storageDisks) / 2
+	writeQuorum := len(xl.storageDisks)/2 + 1
+
 	// Heal the missing buckets.
-	if err = quickHeal(xl.storageDisks, xl.writeQuorum, xl.readQuorum); err != nil {
+	if err = quickHeal(*xl, writeQuorum, readQuorum); err != nil {
 		t.Fatal(err)
 	}
 
@@ -349,7 +355,7 @@ func TestQuickHeal(t *testing.T) {
 		t.Fatal("storage disk is not *retryStorage type")
 	}
 	xl.storageDisks[0] = newNaughtyDisk(posixDisk, nil, errUnformattedDisk)
-	if err = quickHeal(xl.storageDisks, xl.writeQuorum, xl.readQuorum); err != errUnformattedDisk {
+	if err = quickHeal(*xl, writeQuorum, readQuorum); err != errUnformattedDisk {
 		t.Fatal(err)
 	}
 
@@ -366,7 +372,7 @@ func TestQuickHeal(t *testing.T) {
 	}
 	xl = obj.(*xlObjects)
 	xl.storageDisks[0] = nil
-	if err = quickHeal(xl.storageDisks, xl.writeQuorum, xl.readQuorum); err != nil {
+	if err = quickHeal(*xl, writeQuorum, readQuorum); err != nil {
 		t.Fatal("Got an unexpected error: ", err)
 	}
 
@@ -388,7 +394,7 @@ func TestQuickHeal(t *testing.T) {
 		t.Fatal("storage disk is not *retryStorage type")
 	}
 	xl.storageDisks[0] = newNaughtyDisk(posixDisk, nil, errDiskNotFound)
-	if err = quickHeal(xl.storageDisks, xl.writeQuorum, xl.readQuorum); err != nil {
+	if err = quickHeal(*xl, writeQuorum, readQuorum); err != nil {
 		t.Fatal("Got an unexpected error: ", err)
 	}
 }
@@ -489,13 +495,13 @@ func TestHealObjectXL(t *testing.T) {
 		t.Fatalf("Failed to create a multipart upload - %v", err)
 	}
 
-	var uploadedParts []completePart
+	var uploadedParts []CompletePart
 	for _, partID := range []int{2, 1} {
 		pInfo, err1 := obj.PutObjectPart(bucket, object, uploadID, partID, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""))
 		if err1 != nil {
 			t.Fatalf("Failed to upload a part - %v", err1)
 		}
-		uploadedParts = append(uploadedParts, completePart{
+		uploadedParts = append(uploadedParts, CompletePart{
 			PartNumber: pInfo.PartNumber,
 			ETag:       pInfo.ETag,
 		})
@@ -531,7 +537,8 @@ func TestHealObjectXL(t *testing.T) {
 
 	// Try healing now, expect to receive errDiskNotFound.
 	_, _, err = obj.HealObject(bucket, object)
-	if errorCause(err) != errDiskNotFound {
+	// since majority of xl.jsons are not available, object quorum can't be read properly and error will be errXLReadQuorum
+	if errors.Cause(err) != errXLReadQuorum {
 		t.Errorf("Expected %v but received %v", errDiskNotFound, err)
 	}
 }

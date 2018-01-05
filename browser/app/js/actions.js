@@ -24,6 +24,8 @@ export const SET_CURRENT_BUCKET = 'SET_CURRENT_BUCKET'
 export const SET_CURRENT_PATH = 'SET_CURRENT_PATH'
 export const SET_BUCKETS = 'SET_BUCKETS'
 export const ADD_BUCKET = 'ADD_BUCKET'
+export const REMOVE_BUCKET = 'REMOVE_BUCKET'
+export const SHOW_BUCKET_DROPDOWN = 'SHOW_BUCKET_DROPDOWN'
 export const SET_VISIBLE_BUCKETS = 'SET_VISIBLE_BUCKETS'
 export const SET_OBJECTS = 'SET_OBJECTS'
 export const APPEND_OBJECTS = 'APPEND_OBJECTS'
@@ -173,6 +175,27 @@ export const addBucket = bucket => {
   }
 }
 
+export const removeBucket = bucket => {
+  return {
+    type: REMOVE_BUCKET,
+    bucket
+  }
+}
+
+export const showBucketDropdown = bucket => {
+  return {
+    type: SHOW_BUCKET_DROPDOWN,
+    showBucketDropdown: true
+  }
+}
+
+export const hideBucketDropdown = bucket => {
+  return {
+    type: SHOW_BUCKET_DROPDOWN,
+    showBucketDropdown: false
+  }
+}
+
 export const showMakeBucketModal = () => {
   return {
     type: SHOW_MAKEBUCKET_MODAL,
@@ -314,10 +337,35 @@ export const selectBucket = (newCurrentBucket, prefix) => {
   }
 }
 
+export const deleteBucket = (bucket) => {
+  return (dispatch, getState) => {
+    // DeleteBucket() RPC call will ONLY delete a bucket if it is empty of
+    // objects. This means a call can just be sent, as it is entirely reversable
+    // and won't do any permanent damage.
+    web.DeleteBucket({
+      bucketName: bucket
+    })
+      .then(() => {
+        dispatch(showAlert({
+          type: 'info',
+          message: `Bucket '${bucket}' has been deleted.`
+        }))
+        dispatch(removeBucket(bucket))
+      })
+      .catch(err => {
+        let message = err.message
+        dispatch(showAlert({
+          type: 'danger',
+          message: message
+        }))
+      })
+  }
+}
+
 export const listObjects = () => {
   return (dispatch, getState) => {
-    const {currentBucket, currentPath, marker, objects, istruncated, web} = getState()
-    if (!istruncated) return
+    const {buckets, currentBucket, currentPath, marker, objects, istruncated, web} = getState()
+    if (!istruncated || buckets.length === 0) return
     web.ListObjects({
       bucketName: currentBucket,
       prefix: currentPath,
@@ -465,7 +513,7 @@ export const uploadFile = (file, xhr) => {
   return (dispatch, getState) => {
     const {currentBucket, currentPath} = getState()
     const objectName = `${currentPath}${file.name}`
-    const uploadUrl = `${window.location.origin}/minio/upload/${currentBucket}/${objectName}`
+    const uploadUrl = `${window.location.origin}${minioBrowserPrefix}/upload/${currentBucket}/${objectName}`
     // The slug is a unique identifer for the file upload.
     const slug = `${currentBucket}-${currentPath}-${file.name}`
 
@@ -482,7 +530,7 @@ export const uploadFile = (file, xhr) => {
     }))
 
     xhr.onload = function(event) {
-      if (xhr.status == 401 || xhr.status == 403 || xhr.status == 500) {
+      if (xhr.status == 401 || xhr.status == 403) {
         setShowAbortModal(false)
         dispatch(stopUpload({
           slug
@@ -490,6 +538,16 @@ export const uploadFile = (file, xhr) => {
         dispatch(showAlert({
           type: 'danger',
           message: 'Unauthorized request.'
+        }))
+      }
+      if (xhr.status == 500) {
+        setShowAbortModal(false)
+        dispatch(stopUpload({
+          slug
+        }))
+        dispatch(showAlert({
+          type: 'danger',
+          message: xhr.responseText
         }))
       }
       if (xhr.status == 200) {

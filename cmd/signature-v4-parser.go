@@ -20,6 +20,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/minio/minio/pkg/auth"
 )
 
 // credentialHeader data type represents structured form of Credential
@@ -57,7 +59,7 @@ func parseCredentialHeader(credElement string) (ch credentialHeader, aec APIErro
 	if len(credElements) != 5 {
 		return ch, ErrCredMalformed
 	}
-	if !isAccessKeyValid(credElements[0]) {
+	if !auth.IsAccessKeyValid(credElements[0]) {
 		return ch, ErrInvalidAccessKeyID
 	}
 	// Save access key id.
@@ -185,6 +187,11 @@ func parsePreSignV4(query url.Values) (psv preSignValues, aec APIErrorCode) {
 
 	if preSignV4Values.Expires < 0 {
 		return psv, ErrNegativeExpires
+	}
+
+	// Check if Expiry time is less than 7 days (value in seconds).
+	if preSignV4Values.Expires.Seconds() > 604800 {
+		return psv, ErrMaximumExpires
 	}
 	// Save signed headers.
 	preSignV4Values.SignedHeaders, err = parseSignedHeader("SignedHeaders=" + query.Get("X-Amz-SignedHeaders"))

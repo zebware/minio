@@ -137,13 +137,13 @@ type bucketMeta struct {
 
 // Notification event object metadata.
 type objectMeta struct {
-	Key         string            `json:"key"`
-	Size        int64             `json:"size,omitempty"`
-	ETag        string            `json:"eTag,omitempty"`
-	ContentType string            `json:"contentType,omitempty"`
-	UserDefined map[string]string `json:"userDefined,omitempty"`
-	VersionID   string            `json:"versionId,omitempty"`
-	Sequencer   string            `json:"sequencer"`
+	Key          string            `json:"key"`
+	Size         int64             `json:"size,omitempty"`
+	ETag         string            `json:"eTag,omitempty"`
+	ContentType  string            `json:"contentType,omitempty"`
+	UserMetadata map[string]string `json:"userMetadata,omitempty"`
+	VersionID    string            `json:"versionId,omitempty"`
+	Sequencer    string            `json:"sequencer"`
 }
 
 const (
@@ -209,5 +209,5 @@ type arnSQS struct {
 
 // Stringer for constructing AWS ARN compatible string.
 func (m arnSQS) String() string {
-	return minioSqs + serverConfig.GetRegion() + ":" + m.AccountID + ":" + m.Type
+	return minioSqs + globalServerConfig.GetRegion() + ":" + m.AccountID + ":" + m.Type
 }

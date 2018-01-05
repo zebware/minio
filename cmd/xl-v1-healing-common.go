@@ -19,6 +19,8 @@ package cmd
 import (
 	"path/filepath"
 	"time"
+
+	"github.com/minio/minio/pkg/errors"
 )
 
 // commonTime returns a maximally occurring time from a list of time.
@@ -119,6 +121,29 @@ func listOnlineDisks(disks []StorageAPI, partsMetadata []xlMetaV1, errs []error)
 	return onlineDisks, modTime
 }
 
+// Returns one of the latest updated xlMeta files and count of total valid xlMeta(s) updated latest
+func getLatestXLMeta(partsMetadata []xlMetaV1, errs []error) (xlMetaV1, int) {
+	// List all the file commit ids from parts metadata.
+	modTimes := listObjectModtimes(partsMetadata, errs)
+
+	// Count all lastest updated xlMeta values
+	var count int
+	var latestXLMeta xlMetaV1
+
+	// Reduce list of UUIDs to a single common value - i.e. the last updated Time
+	modTime, _ := commonTime(modTimes)
+
+	// Interate through all the modTimes and count the xlMeta(s) with latest time.
+	for index, t := range modTimes {
+		if t == modTime && partsMetadata[index].IsValid() {
+			latestXLMeta = partsMetadata[index]
+			count++
+		}
+	}
+	// Return one of the latest xlMetaData, and the count of lastest updated xlMeta files
+	return latestXLMeta, count
+}
+
 // outDatedDisks - return disks which don't have the latest object (i.e xl.json).
 // disks that are offline are not 'marked' outdated.
 func outDatedDisks(disks, latestDisks []StorageAPI, errs []error, partsMetadata []xlMetaV1,
@@ -130,7 +155,7 @@ func outDatedDisks(disks, latestDisks []StorageAPI, errs []error, partsMetadata 
 			continue
 		}
 		// disk either has an older xl.json or doesn't have one.
-		switch errorCause(errs[index]) {
+		switch errors.Cause(errs[index]) {
 		case nil, errFileNotFound:
 			outDatedDisks[index] = disks[index]
 		}
@@ -182,7 +207,11 @@ func xlHealStat(xl xlObjects, partsMetadata []xlMetaV1, errs []error) HealObject
 	// Less than quorum erasure coded blocks of the object have the same create time.
 	// This object can't be healed with the information we have.
 	modTime, count := commonTime(listObjectModtimes(partsMetadata, errs))
-	if count < xl.readQuorum {
+
+	// get read quorum for this object
+	readQuorum, _, err := objectQuorumFromMeta(xl, partsMetadata, errs)
+
+	if count < readQuorum || err != nil {
 		return HealObjectInfo{
 			Status:             quorumUnavailable,
 			MissingDataCount:   0,
@@ -210,12 +239,12 @@ func xlHealStat(xl xlObjects, partsMetadata []xlMetaV1, errs []error) HealObject
 		// xl.json is not found, which implies the erasure
 		// coded blocks are unavailable in the corresponding disk.
 		// First half of the disks are data and the rest are parity.
-		switch realErr := errorCause(err); realErr {
+		switch realErr := errors.Cause(err); realErr {
 		case errDiskNotFound:
 			disksMissing = true
 			fallthrough
 		case errFileNotFound:
-			if xlMeta.Erasure.Distribution[i]-1 < xl.dataBlocks {
+			if xlMeta.Erasure.Distribution[i]-1 < xlMeta.Erasure.DataBlocks {
 				missingDataCount++
 			} else {
 				missingParityCount++
@@ -280,7 +309,7 @@ func disksWithAllParts(onlineDisks []StorageAPI, partsMetadata []xlMetaV1, errs 
 					availableDisks[i] = OfflineDisk
 					break
 				}
-				return nil, nil, traceError(hErr)
+				return nil, nil, errors.Trace(hErr)
 			}
 		}
 

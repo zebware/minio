@@ -58,19 +58,17 @@ spelling:
 check: test
 test: verifiers build
 	@echo "Running unit tests"
-	@go test $(GOFLAGS) .
-	@go test $(GOFLAGS) github.com/minio/minio/cmd...
-	@go test $(GOFLAGS) github.com/minio/minio/pkg...
+	@go test $(GOFLAGS) ./...
 	@echo "Verifying build"
 	@(env bash $(PWD)/buildscripts/verify-build.sh)
 
 coverage: build
 	@echo "Running all coverage for minio"
-	@./buildscripts/go-coverage.sh
+	@(env bash $(PWD)/buildscripts/go-coverage.sh)
 
 # Builds minio locally.
 build:
-	@echo "Building minio to $(PWD)/minio ..."
+	@echo "Building minio binary: $(PWD)/minio"
 	@CGO_ENABLED=0 go build --ldflags $(BUILD_LDFLAGS) -o $(PWD)/minio
 
 pkg-add:
@@ -90,15 +88,9 @@ pkg-list:
 
 # Builds minio and installs it to $GOPATH/bin.
 install: build
-	@echo "Installing minio at $(GOPATH)/bin/minio ..."
+	@echo "Installing minio binary: $(GOPATH)/bin/minio"
 	@cp $(PWD)/minio $(GOPATH)/bin/minio
-	@echo "Check 'minio -h' for help."
-
-release: verifiers
-	@MINIO_RELEASE=RELEASE ./buildscripts/build.sh
-
-experimental: verifiers
-	@MINIO_RELEASE=EXPERIMENTAL ./buildscripts/build.sh
+	@echo "\nInstallation successful. To learn more, try \"minio --help\"."
 
 clean:
 	@echo "Cleaning up all the generated files"

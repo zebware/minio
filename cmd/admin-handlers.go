@@ -28,6 +28,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/minio/minio/pkg/auth"
 )
 
 const (
@@ -168,7 +170,7 @@ func (adminAPI adminAPIHandlers) ServiceCredentialsHandler(w http.ResponseWriter
 		return
 	}
 
-	creds, err := createCredential(req.Username, req.Password)
+	creds, err := auth.CreateCredentials(req.Username, req.Password)
 	if err != nil {
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return
@@ -181,12 +183,12 @@ func (adminAPI adminAPIHandlers) ServiceCredentialsHandler(w http.ResponseWriter
 	}
 
 	// Update local credentials in memory.
-	prevCred := serverConfig.SetCredential(creds)
+	prevCred := globalServerConfig.SetCredential(creds)
 
 	// Save credentials to config file
-	if err = serverConfig.Save(); err != nil {
+	if err = globalServerConfig.Save(); err != nil {
 		// Save the current creds when failed to update.
-		serverConfig.SetCredential(prevCred)
+		globalServerConfig.SetCredential(prevCred)
 
 		errorIf(err, "Unable to update the config with new credentials.")
 		writeErrorResponse(w, ErrInternalError, r.URL)
@@ -838,15 +840,19 @@ func (adminAPI adminAPIHandlers) HealFormatHandler(w http.ResponseWriter, r *htt
 		return
 	}
 
+	// Wrap into retrying disks
+	retryingDisks := initRetryableStorageDisks(bootstrapDisks,
+		time.Millisecond, time.Millisecond*5, globalStorageHealthCheckInterval, globalStorageRetryThreshold)
+
 	// Heal format.json on available storage.
-	err = healFormatXL(bootstrapDisks)
+	err = healFormatXL(retryingDisks)
 	if err != nil {
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return
 	}
 
 	// Instantiate new object layer with newly formatted storage.
-	newObjectAPI, err := newXLObjects(bootstrapDisks)
+	newObjectAPI, err := newXLObjects(retryingDisks)
 	if err != nil {
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return
@@ -979,7 +985,7 @@ func (adminAPI adminAPIHandlers) SetConfigHandler(w http.ResponseWriter, r *http
 		return
 	}
 
-	var config serverConfigV19
+	var config serverConfig
 	err = json.Unmarshal(configBytes, &config)
 
 	if err != nil {
@@ -989,7 +995,7 @@ func (adminAPI adminAPIHandlers) SetConfigHandler(w http.ResponseWriter, r *http
 	}
 
 	if globalIsEnvCreds {
-		creds := serverConfig.GetCredential()
+		creds := globalServerConfig.GetCredential()
 		if config.Credential.AccessKey != creds.AccessKey ||
 			config.Credential.SecretKey != creds.SecretKey {
 			writeErrorResponse(w, ErrAdminCredentialsMismatch, r.URL)

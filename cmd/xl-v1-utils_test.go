@@ -25,6 +25,7 @@ import (
 	"testing"
 
 	humanize "github.com/dustin/go-humanize"
+	"github.com/minio/minio/pkg/errors"
 )
 
 // Tests caclculating disk count.
@@ -91,11 +92,11 @@ func TestReduceErrs(t *testing.T) {
 	// Validates list of all the testcases for returning valid errors.
 	for i, testCase := range testCases {
 		gotErr := reduceReadQuorumErrs(testCase.errs, testCase.ignoredErrs, 5)
-		if errorCause(gotErr) != testCase.err {
+		if errors.Cause(gotErr) != testCase.err {
 			t.Errorf("Test %d : expected %s, got %s", i+1, testCase.err, gotErr)
 		}
 		gotNewErr := reduceWriteQuorumErrs(testCase.errs, testCase.ignoredErrs, 6)
-		if errorCause(gotNewErr) != errXLWriteQuorum {
+		if errors.Cause(gotNewErr) != errXLWriteQuorum {
 			t.Errorf("Test %d : expected %s, got %s", i+1, errXLWriteQuorum, gotErr)
 		}
 	}
@@ -109,14 +110,14 @@ func TestHashOrder(t *testing.T) {
 	}{
 		// cases which should pass the test.
 		// passing in valid object name.
-		{"object", []int{15, 16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}},
-		{"The Shining Script <v1>.pdf", []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
+		{"object", []int{14, 15, 16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13}},
+		{"The Shining Script <v1>.pdf", []int{16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}},
 		{"Cost Benefit Analysis (2009-2010).pptx", []int{15, 16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}},
 		{"117Gn8rfHL2ACARPAhaFd0AGzic9pUbIA/5OCn5A", []int{3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1, 2}},
 		{"SHØRT", []int{11, 12, 13, 14, 15, 16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
 		{"There are far too many object names, and far too few bucket names!", []int{15, 16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}},
 		{"a/b/c/", []int{3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1, 2}},
-		{"/a/b/c", []int{7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1, 2, 3, 4, 5, 6}},
+		{"/a/b/c", []int{6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1, 2, 3, 4, 5}},
 		{string([]byte{0xff, 0xfe, 0xfd}), []int{15, 16, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14}},
 	}
 
@@ -382,8 +383,8 @@ func TestGetPartSizeFromIdx(t *testing.T) {
 		if err == nil {
 			t.Errorf("Test %d: Expected to failed but passed. %s", i+1, err)
 		}
-		if err != nil && errorCause(err) != testCaseFailure.err {
-			t.Errorf("Test %d: Expected err %s, but got %s", i+1, testCaseFailure.err, errorCause(err))
+		if err != nil && errors.Cause(err) != testCaseFailure.err {
+			t.Errorf("Test %d: Expected err %s, but got %s", i+1, testCaseFailure.err, errors.Cause(err))
 		}
 	}
 }

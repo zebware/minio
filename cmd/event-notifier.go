@@ -27,6 +27,7 @@ import (
 	"sync"
 
 	"github.com/Sirupsen/logrus"
+	"github.com/minio/minio/pkg/errors"
 	"github.com/minio/minio/pkg/hash"
 )
 
@@ -60,7 +61,7 @@ type internalNotifier struct {
 	// Connected listeners is a map of listener ARNs to channels
 	// on which the ListenBucket API handler go routine is waiting
 	// for events to send to a client.
-	connectedListeners map[string]chan []NotificationEvent
+	connectedListeners map[string]*listenChan
 
 	rwMutex *sync.RWMutex
 }
@@ -106,10 +107,10 @@ func newNotificationEvent(event eventData) NotificationEvent {
 	}
 
 	// Fetch the region.
-	region := serverConfig.GetRegion()
+	region := globalServerConfig.GetRegion()
 
 	// Fetch the credentials.
-	creds := serverConfig.GetCredential()
+	creds := globalServerConfig.GetCredential()
 
 	// Time when Minio finished processing the request.
 	eventTime := UTCNow()
@@ -167,13 +168,13 @@ func newNotificationEvent(event eventData) NotificationEvent {
 
 	// For all other events we should set ETag and Size.
 	nEvent.S3.Object = objectMeta{
-		Key:         escapedObj,
-		ETag:        event.ObjInfo.ETag,
-		Size:        event.ObjInfo.Size,
-		ContentType: event.ObjInfo.ContentType,
-		UserDefined: event.ObjInfo.UserDefined,
-		VersionID:   "1",
-		Sequencer:   uniqueID,
+		Key:          escapedObj,
+		ETag:         event.ObjInfo.ETag,
+		Size:         event.ObjInfo.Size,
+		ContentType:  event.ObjInfo.ContentType,
+		UserMetadata: event.ObjInfo.UserDefined,
+		VersionID:    "1",
+		Sequencer:    uniqueID,
 	}
 
 	// Success.
@@ -206,7 +207,7 @@ func (en eventNotifier) GetInternalTarget(arn string) *listenerLogger {
 }
 
 // Set a new sns target for an input sns ARN.
-func (en *eventNotifier) AddListenerChan(snsARN string, listenerCh chan []NotificationEvent) error {
+func (en *eventNotifier) AddListenerChan(snsARN string, listenerCh *listenChan) error {
 	if listenerCh == nil {
 		return errInvalidArgument
 	}
@@ -229,9 +230,9 @@ func (en *eventNotifier) SendListenerEvent(arn string, event []NotificationEvent
 	en.internal.rwMutex.Lock()
 	defer en.internal.rwMutex.Unlock()
 
-	ch, ok := en.internal.connectedListeners[arn]
+	listenChan, ok := en.internal.connectedListeners[arn]
 	if ok {
-		ch <- event
+		listenChan.sendNotificationEvent(event)
 	}
 	// If the channel is not present we ignore the event.
 	return nil
@@ -378,7 +379,7 @@ func loadNotificationConfig(bucket string, objAPI ObjectLayer) (*notificationCon
 		// 'errNoSuchNotifications'.  This is default when no
 		// bucket notifications are found on the bucket.
 		if isErrObjectNotFound(err) || isErrIncompleteBody(err) {
-			return nil, traceError(errNoSuchNotifications)
+			return nil, errors.Trace(errNoSuchNotifications)
 		}
 		errorIf(err, "Unable to load bucket-notification for bucket %s", bucket)
 		// Returns error for other errors.
@@ -387,7 +388,7 @@ func loadNotificationConfig(bucket string, objAPI ObjectLayer) (*notificationCon
 
 	// if `notifications.xml` is empty we should return NoSuchNotifications.
 	if buffer.Len() == 0 {
-		return nil, traceError(errNoSuchNotifications)
+		return nil, errors.Trace(errNoSuchNotifications)
 	}
 
 	// Unmarshal notification bytes.
@@ -395,7 +396,7 @@ func loadNotificationConfig(bucket string, objAPI ObjectLayer) (*notificationCon
 	notificationCfg := &notificationConfig{}
 	// Unmarshal notification bytes only if we read data.
 	if err = xml.Unmarshal(notificationConfigBytes, notificationCfg); err != nil {
-		return nil, traceError(err)
+		return nil, errors.Trace(err)
 	}
 
 	// Return success.
@@ -429,7 +430,7 @@ func loadListenerConfig(bucket string, objAPI ObjectLayer) ([]listenerConfig, er
 		// 'errNoSuchNotifications'.  This is default when no
 		// bucket listeners are found on the bucket
 		if isErrObjectNotFound(err) || isErrIncompleteBody(err) {
-			return nil, traceError(errNoSuchNotifications)
+			return nil, errors.Trace(errNoSuchNotifications)
 		}
 		errorIf(err, "Unable to load bucket-listeners for bucket %s", bucket)
 		// Returns error for other errors.
@@ -438,14 +439,14 @@ func loadListenerConfig(bucket string, objAPI ObjectLayer) ([]listenerConfig, er
 
 	// if `listener.json` is empty we should return NoSuchNotifications.
 	if buffer.Len() == 0 {
-		return nil, traceError(errNoSuchNotifications)
+		return nil, errors.Trace(errNoSuchNotifications)
 	}
 
 	var lCfg []listenerConfig
 	lConfigBytes := buffer.Bytes()
 	if err = json.Unmarshal(lConfigBytes, &lCfg); err != nil {
 		errorIf(err, "Unable to unmarshal listener config from JSON.")
-		return nil, traceError(err)
+		return nil, errors.Trace(err)
 	}
 
 	// Return success.
@@ -552,13 +553,13 @@ func removeListenerConfig(bucket string, objAPI ObjectLayer) error {
 func loadNotificationAndListenerConfig(bucketName string, objAPI ObjectLayer) (nCfg *notificationConfig, lCfg []listenerConfig, err error) {
 	// Loads notification config if any.
 	nCfg, err = loadNotificationConfig(bucketName, objAPI)
-	if err != nil && !isErrIgnored(err, errDiskNotFound, errNoSuchNotifications) {
+	if err != nil && !errors.IsErrIgnored(err, errDiskNotFound, errNoSuchNotifications) {
 		return nil, nil, err
 	}
 
 	// Loads listener config if any.
 	lCfg, err = loadListenerConfig(bucketName, objAPI)
-	if err != nil && !isErrIgnored(err, errDiskNotFound, errNoSuchNotifications) {
+	if err != nil && !errors.IsErrIgnored(err, errDiskNotFound, errNoSuchNotifications) {
 		return nil, nil, err
 	}
 	return nCfg, lCfg, nil
@@ -595,7 +596,7 @@ func addQueueTarget(queueTargets map[string]*logrus.Logger,
 	newTargetFunc func(string) (*logrus.Logger, error)) (string, error) {
 
 	// Construct the queue ARN for AMQP.
-	queueARN := minioSqs + serverConfig.GetRegion() + ":" + accountID + ":" + queueType
+	queueARN := minioSqs + globalServerConfig.GetRegion() + ":" + accountID + ":" + queueType
 
 	// Queue target if already initialized we move to the next ARN.
 	if _, ok := queueTargets[queueARN]; ok {
@@ -618,7 +619,7 @@ func addQueueTarget(queueTargets map[string]*logrus.Logger,
 func loadAllQueueTargets() (map[string]*logrus.Logger, error) {
 	queueTargets := make(map[string]*logrus.Logger)
 	// Load all amqp targets, initialize their respective loggers.
-	for accountID, amqpN := range serverConfig.Notify.GetAMQP() {
+	for accountID, amqpN := range globalServerConfig.Notify.GetAMQP() {
 		if !amqpN.Enable {
 			continue
 		}
@@ -637,7 +638,7 @@ func loadAllQueueTargets() (map[string]*logrus.Logger, error) {
 	}
 
 	// Load all mqtt targets, initialize their respective loggers.
-	for accountID, mqttN := range serverConfig.Notify.GetMQTT() {
+	for accountID, mqttN := range globalServerConfig.Notify.GetMQTT() {
 		if !mqttN.Enable {
 			continue
 		}
@@ -656,7 +657,7 @@ func loadAllQueueTargets() (map[string]*logrus.Logger, error) {
 	}
 
 	// Load all nats targets, initialize their respective loggers.
-	for accountID, natsN := range serverConfig.Notify.GetNATS() {
+	for accountID, natsN := range globalServerConfig.Notify.GetNATS() {
 		if !natsN.Enable {
 			continue
 		}
@@ -675,7 +676,7 @@ func loadAllQueueTargets() (map[string]*logrus.Logger, error) {
 	}
 
 	// Load redis targets, initialize their respective loggers.
-	for accountID, redisN := range serverConfig.Notify.GetRedis() {
+	for accountID, redisN := range globalServerConfig.Notify.GetRedis() {
 		if !redisN.Enable {
 			continue
 		}
@@ -694,7 +695,7 @@ func loadAllQueueTargets() (map[string]*logrus.Logger, error) {
 	}
 
 	// Load Webhook targets, initialize their respective loggers.
-	for accountID, webhookN := range serverConfig.Notify.GetWebhook() {
+	for accountID, webhookN := range globalServerConfig.Notify.GetWebhook() {
 		if !webhookN.Enable {
 			continue
 		}
@@ -704,7 +705,7 @@ func loadAllQueueTargets() (map[string]*logrus.Logger, error) {
 	}
 
 	// Load elastic targets, initialize their respective loggers.
-	for accountID, elasticN := range serverConfig.Notify.GetElasticSearch() {
+	for accountID, elasticN := range globalServerConfig.Notify.GetElasticSearch() {
 		if !elasticN.Enable {
 			continue
 		}
@@ -723,7 +724,7 @@ func loadAllQueueTargets() (map[string]*logrus.Logger, error) {
 	}
 
 	// Load PostgreSQL targets, initialize their respective loggers.
-	for accountID, pgN := range serverConfig.Notify.GetPostgreSQL() {
+	for accountID, pgN := range globalServerConfig.Notify.GetPostgreSQL() {
 		if !pgN.Enable {
 			continue
 		}
@@ -742,7 +743,7 @@ func loadAllQueueTargets() (map[string]*logrus.Logger, error) {
 	}
 
 	// Load MySQL targets, initialize their respective loggers.
-	for accountID, msqlN := range serverConfig.Notify.GetMySQL() {
+	for accountID, msqlN := range globalServerConfig.Notify.GetMySQL() {
 		if !msqlN.Enable {
 			continue
 		}
@@ -761,7 +762,7 @@ func loadAllQueueTargets() (map[string]*logrus.Logger, error) {
 	}
 
 	// Load Kafka targets, initialize their respective loggers.
-	for accountID, kafkaN := range serverConfig.Notify.GetKafka() {
+	for accountID, kafkaN := range globalServerConfig.Notify.GetKafka() {
 		if !kafkaN.Enable {
 			continue
 		}
@@ -833,7 +834,7 @@ func initEventNotifier(objAPI ObjectLayer) error {
 			rwMutex:            &sync.RWMutex{},
 			targets:            listenTargets,
 			listenerConfigs:    lConfigs,
-			connectedListeners: make(map[string]chan []NotificationEvent),
+			connectedListeners: make(map[string]*listenChan),
 		},
 	}
 

@@ -157,7 +157,7 @@ export default class Browse extends React.Component {
         // Download the selected file.
         web.CreateURLToken()
           .then(res => {
-            let url = `${window.location.origin}/minio/download/${currentBucket}/${encPrefix}?token=${res.token}`
+            let url = `${window.location.origin}${minioBrowserPrefix}/download/${currentBucket}/${encPrefix}?token=${res.token}`
             window.location = url
           })
           .catch(err => dispatch(actions.showAlert({
@@ -210,9 +210,19 @@ export default class Browse extends React.Component {
     dispatch(actions.hideAbout())
   }
 
+  toggleBucketDropdown(e) {
+    const {dispatch, showBucketDropdown} = this.props
+    if (showBucketDropdown) {
+      dispatch(actions.hideBucketDropdown())
+    } else {
+      dispatch(actions.showBucketDropdown())
+    }
+  }
+
   showBucketPolicy(e) {
     e.preventDefault()
     const {dispatch} = this.props
+    this.toggleBucketDropdown(e)
     dispatch(actions.showBucketPolicy())
   }
 
@@ -222,14 +232,28 @@ export default class Browse extends React.Component {
     dispatch(actions.hideBucketPolicy())
   }
 
+  deleteBucket(e, bucket) {
+    e.preventDefault()
+    const {dispatch} = this.props
+    this.toggleBucketDropdown(e)
+    dispatch(actions.deleteBucket(bucket))
+    browserHistory.push(`${minioBrowserPrefix}/`)
+  }
+
   uploadFile(e) {
     e.preventDefault()
-    const {dispatch, buckets} = this.props
-
+    const {dispatch, buckets, currentBucket} = this.props
     if (buckets.length === 0) {
       dispatch(actions.showAlert({
         type: 'danger',
         message: "Bucket needs to be created before trying to upload files."
+      }))
+      return
+    }
+    if (currentBucket === '') {
+      dispatch(actions.showAlert({
+        type: 'danger',
+        message: "Please choose a bucket before trying to upload files."
       }))
       return
     }
@@ -433,8 +457,7 @@ export default class Browse extends React.Component {
     } else {
       web.CreateURLToken()
         .then(res => {
-          let requestUrl = location.origin + "/minio/zip?token=" + res.token
-
+          let requestUrl = location.origin + minioBrowserPrefix + "/zip?token=" + res.token
           this.xhr = new XMLHttpRequest()
           dispatch(actions.downloadSelected(requestUrl, req, this.xhr))
         })
@@ -503,7 +526,7 @@ export default class Browse extends React.Component {
                                 settingsFunc={ this.showSettings.bind(this) }
                                 logoutFunc={ this.logout.bind(this) } />
     } else {
-      loginButton = <a className='btn btn-danger' href='/minio/login'>Login</a>
+      loginButton = <a className='btn btn-danger' href={minioBrowserPrefix+'/login'}>Login</a>
     }
 
     if (web.LoggedIn()) {
@@ -578,7 +601,9 @@ export default class Browse extends React.Component {
         <SideBar searchBuckets={ this.searchBuckets.bind(this) }
           selectBucket={ this.selectBucket.bind(this) }
           clickOutside={ this.hideSidebar.bind(this) }
-          showPolicy={ this.showBucketPolicy.bind(this) } />
+          showPolicy={ this.showBucketPolicy.bind(this) }
+          deleteBucket={ this.deleteBucket.bind(this) }
+          toggleBucketDropdown={ this.toggleBucketDropdown.bind(this) } />
         <div className="fe-body">
           <div className={ 'list-actions' + (classNames({
                              ' list-actions-toggled': checkedObjects.length > 0

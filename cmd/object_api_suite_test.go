@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	humanize "github.com/dustin/go-humanize"
+	"github.com/minio/minio/pkg/errors"
 )
 
 // Return pointer to testOneByteReadEOF{}
@@ -99,7 +100,7 @@ func testMultipartObjectCreation(obj ObjectLayer, instanceType string, t TestErr
 	}
 	// Create a byte array of 5MiB.
 	data := bytes.Repeat([]byte("0123456789abcdef"), 5*humanize.MiByte/16)
-	completedParts := completeMultipartUpload{}
+	completedParts := CompleteMultipartUpload{}
 	for i := 1; i <= 10; i++ {
 		expectedETaghex := getMD5Hash(data)
 
@@ -111,7 +112,7 @@ func testMultipartObjectCreation(obj ObjectLayer, instanceType string, t TestErr
 		if calcPartInfo.ETag != expectedETaghex {
 			t.Errorf("MD5 Mismatch")
 		}
-		completedParts.Parts = append(completedParts.Parts, completePart{
+		completedParts.Parts = append(completedParts.Parts, CompletePart{
 			PartNumber: i,
 			ETag:       calcPartInfo.ETag,
 		})
@@ -754,7 +755,7 @@ func testGetDirectoryReturnsObjectNotFound(obj ObjectLayer, instanceType string,
 	for i, testCase := range testCases {
 		_, expectedErr := obj.GetObjectInfo(bucketName, testCase.dir)
 		if expectedErr != nil {
-			expectedErr = errorCause(expectedErr)
+			expectedErr = errors.Cause(expectedErr)
 			if expectedErr.Error() != testCase.err.Error() {
 				t.Errorf("Test %d, %s: Expected error %s, got %s", i+1, instanceType, testCase.err, expectedErr)
 			}

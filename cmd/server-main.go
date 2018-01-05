@@ -25,6 +25,7 @@ import (
 
 	"github.com/minio/cli"
 	"github.com/minio/dsync"
+	"github.com/minio/minio/pkg/errors"
 	miniohttp "github.com/minio/minio/pkg/http"
 )
 
@@ -60,6 +61,9 @@ ENVIRONMENT VARIABLES:
 
   REGION:
      MINIO_REGION: To set custom region. By default it is "us-east-1".
+
+  UPDATE:
+     MINIO_UPDATE: To turn off in-place upgrades, set this value to "off".
 
 EXAMPLES:
   1. Start minio server on "/home/shared" directory.
@@ -146,16 +150,18 @@ func serverMain(ctx *cli.Context) {
 	// Initialize server config.
 	initConfig()
 
-	// Enable loggers as per configuration file.
-	enableLoggers()
-
 	// Init the error tracing module.
-	initError()
+	errors.Init(GOPATH, "github.com/minio/minio")
 
 	// Check and load SSL certificates.
 	var err error
 	globalPublicCerts, globalRootCAs, globalTLSCertificate, globalIsSSL, err = getSSLConfig()
 	fatalIf(err, "Invalid SSL certificate file")
+
+	// Is distributed setup, error out if no certificates are found for HTTPS endpoints.
+	if globalIsDistXL && globalEndpoints.IsHTTPS() && !globalIsSSL {
+		fatalIf(errInvalidArgument, "No certificates found for HTTPS endpoints (%s)", globalEndpoints)
+	}
 
 	if !quietFlag {
 		// Check for new updates from dl.minio.io.
@@ -181,7 +187,6 @@ func serverMain(ctx *cli.Context) {
 	initNSLock(globalIsDistXL)
 
 	// Configure server.
-	// Declare handler to avoid lint errors.
 	var handler http.Handler
 	handler, err = configureServerHandler(globalEndpoints)
 	fatalIf(err, "Unable to configure one of server's RPC services.")

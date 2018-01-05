@@ -23,6 +23,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	errors2 "github.com/minio/minio/pkg/errors"
 	"github.com/minio/minio/pkg/hash"
 	"github.com/minio/minio/pkg/lock"
 )
@@ -316,7 +317,7 @@ func TestFormatXLHealFreshDisks(t *testing.T) {
 // a given disk to test healing a corrupted disk
 func TestFormatXLHealCorruptedDisks(t *testing.T) {
 	// Create an instance of xl backend.
-	obj, fsDirs, err := prepareXL()
+	obj, fsDirs, err := prepareXL16()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,7 +391,7 @@ func TestFormatXLHealCorruptedDisks(t *testing.T) {
 // some of format.json
 func TestFormatXLReorderByInspection(t *testing.T) {
 	// Create an instance of xl backend.
-	obj, fsDirs, err := prepareXL()
+	obj, fsDirs, err := prepareXL16()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -756,7 +757,7 @@ func TestFSCheckFormatFSErr(t *testing.T) {
 			t.Errorf("Test %d: Should fail with expected %s, got nil", i+1, testCase.formatCheckErr)
 		}
 		if err != nil && !testCase.shouldPass {
-			if errorCause(err).Error() != testCase.formatCheckErr.Error() {
+			if errors2.Cause(err).Error() != testCase.formatCheckErr.Error() {
 				t.Errorf("Test %d: Should fail with expected %s, got %s", i+1, testCase.formatCheckErr, err)
 			}
 		}

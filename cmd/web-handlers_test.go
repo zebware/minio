@@ -143,7 +143,7 @@ func TestWebHandlerLogin(t *testing.T) {
 func testLoginWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	// test cases with sample input and expected output.
 	testCases := []struct {
@@ -183,7 +183,7 @@ func testStorageInfoWebHandler(obj ObjectLayer, instanceType string, t TestErrHa
 	// get random bucket name.
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
@@ -220,7 +220,7 @@ func TestWebHandlerServerInfo(t *testing.T) {
 func testServerInfoWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
@@ -261,7 +261,7 @@ func TestWebHandlerMakeBucket(t *testing.T) {
 func testMakeBucketWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
@@ -305,6 +305,107 @@ func testMakeBucketWebHandler(obj ObjectLayer, instanceType string, t TestErrHan
 	}
 }
 
+// Wrapper for calling DeleteBucket handler
+func TestWebHandlerDeleteBucket(t *testing.T) {
+	ExecObjectLayerTest(t, testDeleteBucketWebHandler)
+}
+
+// testDeleteBucketWebHandler - Test DeleteBucket web handler
+func testDeleteBucketWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
+	apiRouter := initTestWebRPCEndPoint(obj)
+
+	credentials := globalServerConfig.GetCredential()
+	token, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
+	if err != nil {
+		t.Fatalf("could not get RPC token, %s", err.Error())
+	}
+
+	bucketName := getRandomBucketName()
+	err = obj.MakeBucketWithLocation(bucketName, "")
+	if err != nil {
+		t.Fatalf("failed to create bucket: %s (%s)", err.Error(), instanceType)
+	}
+
+	testCases := []struct {
+		bucketName string
+		// Whether or not to put an object into the bucket.
+		initWithObject bool
+		token          string
+		// Expected error (error must only contain this string to pass test)
+		// Empty string = no error
+		expect string
+	}{
+		{"", false, token, "Bucket Name  is invalid"},
+		{".", false, "auth", "Authentication failed"},
+		{".", false, token, "Bucket Name . is invalid"},
+		{"ab", false, token, "Bucket Name ab is invalid"},
+		{"minio", false, "false token", "Authentication failed"},
+		{"minio", false, token, "specified bucket minio does not exist"},
+		{bucketName, false, token, ""},
+		{bucketName, true, token, "Bucket not empty"},
+		{bucketName, false, "", "Authentication failed"},
+	}
+
+	for _, test := range testCases {
+		if test.initWithObject {
+			data := bytes.NewBufferString("hello")
+			_, err = obj.PutObject(test.bucketName, "object", mustGetHashReader(t, data, int64(data.Len()), "", ""), nil)
+			// _, err = obj.PutObject(test.bucketName, "object", int64(data.Len()), data, nil, "")
+			if err != nil {
+				t.Fatalf("could not put object to %s, %s", test.bucketName, err.Error())
+			}
+		}
+
+		rec := httptest.NewRecorder()
+
+		makeBucketRequest := MakeBucketArgs{BucketName: test.bucketName}
+		makeBucketReply := &WebGenericRep{}
+
+		req, err := newTestWebRPCRequest("Web.DeleteBucket", test.token, makeBucketRequest)
+		if err != nil {
+			t.Errorf("failed to create HTTP request: <ERROR> %v", err)
+		}
+
+		apiRouter.ServeHTTP(rec, req)
+		if rec.Code != http.StatusOK {
+			t.Errorf("expected the response status to be `%d`, but instead found `%d`", http.StatusOK, rec.Code)
+		}
+		err = getTestWebRPCResponse(rec, &makeBucketReply)
+
+		if test.expect != "" {
+			if err == nil {
+				// If we expected an error, but didn't get one.
+				t.Errorf("expected `..%s..` but got nil error", test.expect)
+			} else if !strings.Contains(err.Error(), test.expect) {
+				// If we got an error that wasn't what we expected.
+				t.Errorf("expected `..%s..` but got `%s`", test.expect, err.Error())
+			}
+		} else if test.expect == "" && err != nil {
+			t.Errorf("expected test success, but got `%s`", err.Error())
+		}
+
+		// If we created the bucket with an object, now delete the object to cleanup.
+		if test.initWithObject {
+			err = obj.DeleteObject(test.bucketName, "object")
+			if err != nil {
+				t.Fatalf("could not delete object, %s", err.Error())
+			}
+		}
+
+		// If it did not succeed in deleting the bucket, don't try and recreate it.
+		// Or, it'll fail if there was an object.
+		if err != nil || test.initWithObject {
+			continue
+		}
+
+		err = obj.MakeBucketWithLocation(bucketName, "")
+		if err != nil {
+			// failed to create new bucket, abort.
+			t.Fatalf("failed to create new bucket (%s): %s", instanceType, err.Error())
+		}
+	}
+}
+
 // Wrapper for calling ListBuckets Web Handler
 func TestWebHandlerListBuckets(t *testing.T) {
 	ExecObjectLayerTest(t, testListBucketsWebHandler)
@@ -314,7 +415,7 @@ func TestWebHandlerListBuckets(t *testing.T) {
 func testListBucketsWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
@@ -362,7 +463,7 @@ func TestWebHandlerListObjects(t *testing.T) {
 func testListObjectsWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	rec := httptest.NewRecorder()
 
@@ -433,12 +534,12 @@ func testListObjectsWebHandler(obj ObjectLayer, instanceType string, t TestErrHa
 		t.Fatalf("Expected error `%s`", err)
 	}
 
-	policy := bucketPolicy{
+	policy := policy.BucketAccessPolicy{
 		Version:    "1.0",
-		Statements: []policyStatement{getReadOnlyObjectStatement(bucketName, "")},
+		Statements: []policy.Statement{getReadOnlyObjectStatement(bucketName, "")},
 	}
 
-	globalBucketPolicies.SetBucketPolicy(bucketName, policyChange{false, &policy})
+	globalBucketPolicies.SetBucketPolicy(bucketName, policyChange{false, policy})
 
 	// Unauthenticated ListObjects with READ bucket policy should succeed.
 	err, reply = test("")
@@ -457,7 +558,7 @@ func TestWebHandlerRemoveObject(t *testing.T) {
 func testRemoveObjectWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	rec := httptest.NewRecorder()
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
@@ -548,7 +649,7 @@ func TestWebHandlerGenerateAuth(t *testing.T) {
 func testGenerateAuthWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	rec := httptest.NewRecorder()
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
@@ -585,7 +686,7 @@ func TestWebHandlerSetAuth(t *testing.T) {
 func testSetAuthWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	rec := httptest.NewRecorder()
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
@@ -637,7 +738,7 @@ func TestWebHandlerGetAuth(t *testing.T) {
 func testGetAuthWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	rec := httptest.NewRecorder()
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
@@ -680,7 +781,7 @@ func getTokenString(accessKey, secretKey string) (string, error) {
 
 func testCreateURLToken(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
@@ -737,7 +838,7 @@ func TestWebHandlerUpload(t *testing.T) {
 func testUploadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	content := []byte("temporary file's content")
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
@@ -807,12 +908,12 @@ func testUploadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler
 		t.Fatalf("Expected the response status to be 403, but instead found `%d`", code)
 	}
 
-	policy := bucketPolicy{
+	bp := policy.BucketAccessPolicy{
 		Version:    "1.0",
-		Statements: []policyStatement{getWriteOnlyObjectStatement(bucketName, "")},
+		Statements: []policy.Statement{getWriteOnlyObjectStatement(bucketName, "")},
 	}
 
-	globalBucketPolicies.SetBucketPolicy(bucketName, policyChange{false, &policy})
+	globalBucketPolicies.SetBucketPolicy(bucketName, policyChange{false, bp})
 
 	// Unauthenticated upload with WRITE policy should succeed.
 	code = test("", true)
@@ -830,7 +931,7 @@ func TestWebHandlerDownload(t *testing.T) {
 func testDownloadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
@@ -914,12 +1015,12 @@ func testDownloadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandl
 		t.Fatalf("Expected the response status to be 403, but instead found `%d`", code)
 	}
 
-	policy := bucketPolicy{
+	bp := policy.BucketAccessPolicy{
 		Version:    "1.0",
-		Statements: []policyStatement{getReadOnlyObjectStatement(bucketName, "")},
+		Statements: []policy.Statement{getReadOnlyObjectStatement(bucketName, "")},
 	}
 
-	globalBucketPolicies.SetBucketPolicy(bucketName, policyChange{false, &policy})
+	globalBucketPolicies.SetBucketPolicy(bucketName, policyChange{false, bp})
 
 	// Unauthenticated download with READ policy should succeed.
 	code, bodyContent = test("")
@@ -939,7 +1040,7 @@ func TestWebHandlerDownloadZip(t *testing.T) {
 
 func testWebHandlerDownloadZip(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	authorization, err := authenticateURL(credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
@@ -1023,7 +1124,7 @@ func TestWebHandlerPresignedGetHandler(t *testing.T) {
 func testWebPresignedGetHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
@@ -1128,7 +1229,7 @@ func TestWebHandlerGetBucketPolicyHandler(t *testing.T) {
 func testWebGetBucketPolicyHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
@@ -1142,26 +1243,30 @@ func testWebGetBucketPolicyHandler(obj ObjectLayer, instanceType string, t TestE
 		t.Fatal("Unexpected error: ", err)
 	}
 
-	policyVal := bucketPolicy{
+	policyVal := policy.BucketAccessPolicy{
 		Version: "2012-10-17",
-		Statements: []policyStatement{
+		Statements: []policy.Statement{
 			{
-				Actions:   set.CreateStringSet("s3:GetBucketLocation", "s3:ListBucket"),
-				Effect:    "Allow",
-				Principal: map[string][]string{"AWS": {"*"}},
+				Actions: set.CreateStringSet("s3:GetBucketLocation", "s3:ListBucket"),
+				Effect:  "Allow",
+				Principal: policy.User{
+					AWS: set.CreateStringSet("*"),
+				},
 				Resources: set.CreateStringSet(bucketARNPrefix + bucketName),
 				Sid:       "",
 			},
 			{
-				Actions:   set.CreateStringSet("s3:GetObject"),
-				Effect:    "Allow",
-				Principal: map[string][]string{"AWS": {"*"}},
+				Actions: set.CreateStringSet("s3:GetObject"),
+				Effect:  "Allow",
+				Principal: policy.User{
+					AWS: set.CreateStringSet("*"),
+				},
 				Resources: set.CreateStringSet(bucketARNPrefix + bucketName + "/*"),
 				Sid:       "",
 			},
 		},
 	}
-	if err := writeBucketPolicy(bucketName, obj, &policyVal); err != nil {
+	if err := writeBucketPolicy(bucketName, obj, policyVal); err != nil {
 		t.Fatal("Unexpected error: ", err)
 	}
 
@@ -1202,7 +1307,7 @@ func TestWebHandlerListAllBucketPoliciesHandler(t *testing.T) {
 func testWebListAllBucketPoliciesHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
@@ -1216,32 +1321,32 @@ func testWebListAllBucketPoliciesHandler(obj ObjectLayer, instanceType string, t
 		t.Fatal("Unexpected error: ", err)
 	}
 
-	policyVal := bucketPolicy{
+	stringEqualsConditions := policy.ConditionMap{}
+	stringEqualsConditions["StringEquals"] = make(policy.ConditionKeyMap)
+	stringEqualsConditions["StringEquals"].Add("s3:prefix", set.CreateStringSet("hello"))
+
+	policyVal := policy.BucketAccessPolicy{
 		Version: "2012-10-17",
-		Statements: []policyStatement{
+		Statements: []policy.Statement{
 			{
 				Actions:   set.CreateStringSet("s3:GetBucketLocation"),
 				Effect:    "Allow",
-				Principal: map[string][]string{"AWS": {"*"}},
+				Principal: policy.User{AWS: set.CreateStringSet("*")},
 				Resources: set.CreateStringSet(bucketARNPrefix + bucketName),
 				Sid:       "",
 			},
 			{
-				Actions: set.CreateStringSet("s3:ListBucket"),
-				Conditions: map[string]map[string]set.StringSet{
-					"StringEquals": {
-						"s3:prefix": set.CreateStringSet("hello"),
-					},
-				},
-				Effect:    "Allow",
-				Principal: map[string][]string{"AWS": {"*"}},
-				Resources: set.CreateStringSet(bucketARNPrefix + bucketName),
-				Sid:       "",
+				Actions:    set.CreateStringSet("s3:ListBucket"),
+				Conditions: stringEqualsConditions,
+				Effect:     "Allow",
+				Principal:  policy.User{AWS: set.CreateStringSet("*")},
+				Resources:  set.CreateStringSet(bucketARNPrefix + bucketName),
+				Sid:        "",
 			},
 			{
 				Actions:   set.CreateStringSet("s3:ListBucketMultipartUploads"),
 				Effect:    "Allow",
-				Principal: map[string][]string{"AWS": {"*"}},
+				Principal: policy.User{AWS: set.CreateStringSet("*")},
 				Resources: set.CreateStringSet(bucketARNPrefix + bucketName),
 				Sid:       "",
 			},
@@ -1249,13 +1354,13 @@ func testWebListAllBucketPoliciesHandler(obj ObjectLayer, instanceType string, t
 				Actions: set.CreateStringSet("s3:AbortMultipartUpload", "s3:DeleteObject",
 					"s3:GetObject", "s3:ListMultipartUploadParts", "s3:PutObject"),
 				Effect:    "Allow",
-				Principal: map[string][]string{"AWS": {"*"}},
+				Principal: policy.User{AWS: set.CreateStringSet("*")},
 				Resources: set.CreateStringSet(bucketARNPrefix + bucketName + "/hello*"),
 				Sid:       "",
 			},
 		},
 	}
-	if err := writeBucketPolicy(bucketName, obj, &policyVal); err != nil {
+	if err := writeBucketPolicy(bucketName, obj, policyVal); err != nil {
 		t.Fatal("Unexpected error: ", err)
 	}
 
@@ -1299,7 +1404,7 @@ func TestWebHandlerSetBucketPolicyHandler(t *testing.T) {
 func testWebSetBucketPolicyHandler(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestWebRPCEndPoint(obj)
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
@@ -1348,7 +1453,7 @@ func testWebSetBucketPolicyHandler(obj ObjectLayer, instanceType string, t TestE
 		// Parse RPC response
 		err = getTestWebRPCResponse(rec, &reply)
 		if testCase.pass && err != nil {
-			t.Fatalf("Test %d: Should succeed but it didn't, %v", i+1, err)
+			t.Fatalf("Test %d: Should succeed but it didn't, %#v", i+1, err)
 		}
 		if !testCase.pass && err == nil {
 			t.Fatalf("Test %d: Should fail it didn't", i+1)
@@ -1359,7 +1464,7 @@ func testWebSetBucketPolicyHandler(obj ObjectLayer, instanceType string, t TestE
 // TestWebCheckAuthorization - Test Authorization for all web handlers
 func TestWebCheckAuthorization(t *testing.T) {
 	// Prepare XL backend
-	obj, fsDirs, err := prepareXL()
+	obj, fsDirs, err := prepareXL16()
 	if err != nil {
 		t.Fatalf("Initialization of object layer failed for XL setup: %s", err)
 	}
@@ -1461,7 +1566,7 @@ func TestWebObjectLayerNotReady(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
 		t.Fatal("Cannot authenticate", err)
@@ -1538,7 +1643,7 @@ func TestWebObjectLayerFaultyDisks(t *testing.T) {
 	defer os.RemoveAll(root)
 
 	// Prepare XL backend
-	obj, fsDirs, err := prepareXL()
+	obj, fsDirs, err := prepareXL16()
 	if err != nil {
 		t.Fatalf("Initialization of object layer failed for XL setup: %s", err)
 	}
@@ -1571,7 +1676,7 @@ func TestWebObjectLayerFaultyDisks(t *testing.T) {
 
 	rec := httptest.NewRecorder()
 
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 	authorization, err := getWebRPCToken(apiRouter, credentials.AccessKey, credentials.SecretKey)
 	if err != nil {
 		t.Fatal("Cannot authenticate", err)

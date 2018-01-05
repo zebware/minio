@@ -26,6 +26,7 @@ package cmd
 
 import (
 	"bytes"
+	"crypto/subtle"
 	"encoding/hex"
 	"net/http"
 	"net/url"
@@ -34,7 +35,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/minio/sha256-simd"
+	sha256 "github.com/minio/sha256-simd"
 )
 
 // AWS Signature Version '4' constants.
@@ -146,15 +147,24 @@ func doesPolicySignatureMatch(formValues http.Header) APIErrorCode {
 	return doesPolicySignatureV4Match(formValues)
 }
 
+// compareSignatureV4 returns true if and only if both signatures
+// are equal. The signatures are expected to be HEX encoded strings
+// according to the AWS S3 signature V4 spec.
+func compareSignatureV4(sig1, sig2 string) bool {
+	// The CTC using []byte(str) works because the hex encoding
+	// is unique for a sequence of bytes. See also compareSignatureV2.
+	return subtle.ConstantTimeCompare([]byte(sig1), []byte(sig2)) == 1
+}
+
 // doesPolicySignatureMatch - Verify query headers with post policy
 //     - http://docs.aws.amazon.com/AmazonS3/latest/API/sigv4-HTTPPOSTConstructPolicy.html
 // returns ErrNone if the signature matches.
 func doesPolicySignatureV4Match(formValues http.Header) APIErrorCode {
 	// Access credentials.
-	cred := serverConfig.GetCredential()
+	cred := globalServerConfig.GetCredential()
 
 	// Server region.
-	region := serverConfig.GetRegion()
+	region := globalServerConfig.GetRegion()
 
 	// Parse credential tag.
 	credHeader, err := parseCredentialHeader("Credential=" + formValues.Get("X-Amz-Credential"))
@@ -180,7 +190,7 @@ func doesPolicySignatureV4Match(formValues http.Header) APIErrorCode {
 	newSignature := getSignature(signingKey, formValues.Get("Policy"))
 
 	// Verify signature.
-	if newSignature != formValues.Get("X-Amz-Signature") {
+	if !compareSignatureV4(newSignature, formValues.Get("X-Amz-Signature")) {
 		return ErrSignatureDoesNotMatch
 	}
 
@@ -193,7 +203,7 @@ func doesPolicySignatureV4Match(formValues http.Header) APIErrorCode {
 // returns ErrNone if the signature matches.
 func doesPresignedSignatureMatch(hashedPayload string, r *http.Request, region string) APIErrorCode {
 	// Access credentials.
-	cred := serverConfig.GetCredential()
+	cred := globalServerConfig.GetCredential()
 
 	// Copy request
 	req := *r
@@ -301,7 +311,7 @@ func doesPresignedSignatureMatch(hashedPayload string, r *http.Request, region s
 	newSignature := getSignature(presignedSigningKey, presignedStringToSign)
 
 	// Verify signature.
-	if req.URL.Query().Get("X-Amz-Signature") != newSignature {
+	if !compareSignatureV4(req.URL.Query().Get("X-Amz-Signature"), newSignature) {
 		return ErrSignatureDoesNotMatch
 	}
 	return ErrNone
@@ -312,7 +322,7 @@ func doesPresignedSignatureMatch(hashedPayload string, r *http.Request, region s
 // returns ErrNone if signature matches.
 func doesSignatureMatch(hashedPayload string, r *http.Request, region string) APIErrorCode {
 	// Access credentials.
-	cred := serverConfig.GetCredential()
+	cred := globalServerConfig.GetCredential()
 
 	// Copy request.
 	req := *r
@@ -380,7 +390,7 @@ func doesSignatureMatch(hashedPayload string, r *http.Request, region string) AP
 	newSignature := getSignature(signingKey, stringToSign)
 
 	// Verify if signature match.
-	if newSignature != signV4Values.Signature {
+	if !compareSignatureV4(newSignature, signV4Values.Signature) {
 		return ErrSignatureDoesNotMatch
 	}
 

@@ -135,7 +135,7 @@ func testPostPolicyBucketHandler(obj ObjectLayer, instanceType string, t TestErr
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestAPIEndPoints(obj, []string{"PostPolicy"})
 
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	curTime := UTCNow()
 	curTimePlus5Min := curTime.Add(time.Minute * 5)
@@ -455,7 +455,7 @@ func testPostPolicyBucketHandlerRedirect(obj ObjectLayer, instanceType string, t
 	// Register the API end points with XL/FS object layer.
 	apiRouter := initTestAPIEndPoints(obj, []string{"PostPolicy"})
 
-	credentials := serverConfig.GetCredential()
+	credentials := globalServerConfig.GetCredential()
 
 	curTime := UTCNow()
 	curTimePlus5Min := curTime.Add(time.Minute * 5)
@@ -558,7 +558,7 @@ func newPostRequestV2(endPoint, bucketName, objectName string, accessKey, secret
 	// Set the body equal to the created policy.
 	reader := bytes.NewReader(buf.Bytes())
 
-	req, err := http.NewRequest("POST", makeTestTargetURL(endPoint, bucketName, objectName, nil), reader)
+	req, err := http.NewRequest("POST", makeTestTargetURL(endPoint, bucketName, "", nil), reader)
 	if err != nil {
 		return nil, err
 	}
@@ -636,7 +636,7 @@ func newPostRequestV4Generic(endPoint, bucketName, objectName string, objData []
 	// Set the body equal to the created policy.
 	reader := bytes.NewReader(buf.Bytes())
 
-	req, err := http.NewRequest("POST", makeTestTargetURL(endPoint, bucketName, objectName, nil), reader)
+	req, err := http.NewRequest("POST", makeTestTargetURL(endPoint, bucketName, "", nil), reader)
 	if err != nil {
 		return nil, err
 	}

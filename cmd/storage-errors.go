@@ -27,10 +27,6 @@ var errUnexpected = errors.New("Unexpected error, please report this issue at ht
 // errCorruptedFormat - corrupted backend format.
 var errCorruptedFormat = errors.New("corrupted backend format, please join https://slack.minio.io for assistance")
 
-// errFormatNotSupported - returned when older minio tries to parse metadata
-// created by newer minio.
-var errFormatNotSupported = errors.New("format not supported")
-
 // errUnformattedDisk - unformatted disk found.
 var errUnformattedDisk = errors.New("unformatted disk found")
 
@@ -99,3 +95,12 @@ func (h hashMismatchError) Error() string {
 		"Bitrot verification mismatch - expected %v, received %v",
 		h.expected, h.computed)
 }
+
+// Collection of basic errors.
+var baseErrs = []error{
+	errDiskNotFound,
+	errFaultyDisk,
+	errFaultyRemoteDisk,
+}
+
+var baseIgnoredErrs = baseErrs

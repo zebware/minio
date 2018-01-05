@@ -40,6 +40,9 @@ func TestHashReaderHelperMethods(t *testing.T) {
 	if r.SHA256HexString() != "88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589" {
 		t.Errorf("Expected sha256hex \"88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589\", got %s", r.SHA256HexString())
 	}
+	if r.MD5Base64String() != "4vxxTEcn7pOV8yTNLn8zHw==" {
+		t.Errorf("Expected md5base64 \"4vxxTEcn7pOV8yTNLn8zHw==\", got \"%s\"", r.MD5Base64String())
+	}
 	if r.Size() != 4 {
 		t.Errorf("Expected size 4, got %d", r.Size())
 	}
@@ -49,6 +52,9 @@ func TestHashReaderHelperMethods(t *testing.T) {
 	}
 	if !bytes.Equal(r.MD5(), expectedMD5) {
 		t.Errorf("Expected md5hex \"e2fc714c4727ee9395f324cd2e7f331f\", got %s", r.MD5HexString())
+	}
+	if !bytes.Equal(r.MD5Current(), expectedMD5) {
+		t.Errorf("Expected md5hex \"e2fc714c4727ee9395f324cd2e7f331f\", got %s", hex.EncodeToString(r.MD5Current()))
 	}
 	expectedSHA256, err := hex.DecodeString("88d4266fd4e6338d13b845fcf289579d209c897823b9217da3e161936f031589")
 	if !bytes.Equal(r.SHA256(), expectedSHA256) {
@@ -111,26 +117,30 @@ func TestHashReaderInvalidArguments(t *testing.T) {
 		size              int64
 		md5hex, sha256hex string
 		success           bool
+		expectedErr       error
 	}{
 		// Invalid md5sum NewReader() will fail.
 		{
-			src:     bytes.NewReader([]byte("abcd")),
-			size:    4,
-			md5hex:  "invalid-md5",
-			success: false,
+			src:         bytes.NewReader([]byte("abcd")),
+			size:        4,
+			md5hex:      "invalid-md5",
+			success:     false,
+			expectedErr: BadDigest{},
 		},
 		// Invalid sha256 NewReader() will fail.
 		{
-			src:       bytes.NewReader([]byte("abcd")),
-			size:      4,
-			sha256hex: "invalid-sha256",
-			success:   false,
+			src:         bytes.NewReader([]byte("abcd")),
+			size:        4,
+			sha256hex:   "invalid-sha256",
+			success:     false,
+			expectedErr: SHA256Mismatch{},
 		},
 		// Nested hash reader NewReader() will fail.
 		{
-			src:     &Reader{src: bytes.NewReader([]byte("abcd"))},
-			size:    4,
-			success: false,
+			src:         &Reader{src: bytes.NewReader([]byte("abcd"))},
+			size:        4,
+			success:     false,
+			expectedErr: errNestedReader,
 		},
 		// Expected inputs, NewReader() will succeed.
 		{
@@ -147,6 +157,9 @@ func TestHashReaderInvalidArguments(t *testing.T) {
 		}
 		if err == nil && !testCase.success {
 			t.Errorf("Test %d: Expected error, but got success", i+1)
+		}
+		if err != testCase.expectedErr {
+			t.Errorf("Test %d: Expected error %v, but got %v", i+1, testCase.expectedErr, err)
 		}
 	}
 }

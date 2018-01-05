@@ -24,39 +24,26 @@ import (
 	"time"
 
 	"github.com/minio/cli"
+	"github.com/minio/minio/pkg/auth"
 )
 
 // Check for updates and print a notification message
 func checkUpdate(mode string) {
-	// Its OK to ignore any errors during getUpdateInfo() here.
-	if older, downloadURL, err := getUpdateInfo(1*time.Second, mode); err == nil {
-		if updateMsg := computeUpdateMessage(downloadURL, older); updateMsg != "" {
+	// Its OK to ignore any errors during doUpdate() here.
+	if updateMsg, _, currentReleaseTime, latestReleaseTime, err := getUpdateInfo(2*time.Second, mode); err == nil {
+		if globalInplaceUpdateDisabled {
 			log.Println(updateMsg)
+		} else {
+			log.Println(prepareUpdateMessage("Run `minio update`", latestReleaseTime.Sub(currentReleaseTime)))
 		}
 	}
-}
-
-func enableLoggers() {
-	fileLogTarget := serverConfig.Logger.GetFile()
-	if fileLogTarget.Enable {
-		err := InitFileLogger(&fileLogTarget)
-		fatalIf(err, "Unable to initialize file logger")
-		log.AddTarget(fileLogTarget)
-	}
-
-	consoleLogTarget := serverConfig.Logger.GetConsole()
-	if consoleLogTarget.Enable {
-		InitConsoleLogger(&consoleLogTarget)
-	}
-
-	log.SetConsoleTarget(consoleLogTarget)
 }
 
 func initConfig() {
 	// Config file does not exist, we create it fresh and return upon success.
 	if isFile(getConfigFile()) {
 		fatalIf(migrateConfig(), "Config migration failed.")
-		fatalIf(loadConfig(), "Unable to load config version: '%s'.", v19)
+		fatalIf(loadConfig(), "Unable to load config version: '%s'.", serverConfigVersion)
 	} else {
 		fatalIf(newConfig(), "Unable to initialize minio config for the first time.")
 		log.Println("Created minio configuration file successfully at " + getConfigDir())
@@ -95,7 +82,7 @@ func handleCommonEnvVars() {
 	accessKey := os.Getenv("MINIO_ACCESS_KEY")
 	secretKey := os.Getenv("MINIO_SECRET_KEY")
 	if accessKey != "" && secretKey != "" {
-		cred, err := createCredential(accessKey, secretKey)
+		cred, err := auth.CreateCredentials(accessKey, secretKey)
 		fatalIf(err, "Invalid access/secret Key set in environment.")
 
 		// credential Envs are set globally.
@@ -113,5 +100,47 @@ func handleCommonEnvVars() {
 		// if browser is turned off or on.
 		globalIsEnvBrowser = true
 		globalIsBrowserEnabled = bool(browserFlag)
+	}
+
+	globalHTTPTrace = os.Getenv("MINIO_HTTP_TRACE") != ""
+
+	globalDomainName = os.Getenv("MINIO_DOMAIN")
+	if globalDomainName != "" {
+		globalIsEnvDomainName = true
+	}
+
+	// In place update is true by default if the MINIO_UPDATE is not set
+	// or is not set to 'off', if MINIO_UPDATE is set to 'off' then
+	// in-place update is off.
+	globalInplaceUpdateDisabled = strings.EqualFold(os.Getenv("MINIO_UPDATE"), "off")
+
+	// Validate and store the storage class env variables only for XL/Dist XL setups
+	if globalIsXL {
+		var err error
+
+		// Check for environment variables and parse into storageClass struct
+		if ssc := os.Getenv(standardStorageClassEnv); ssc != "" {
+			globalStandardStorageClass, err = parseStorageClass(ssc)
+			fatalIf(err, "Invalid value set in environment variable %s.", standardStorageClassEnv)
+		}
+
+		if rrsc := os.Getenv(reducedRedundancyStorageClassEnv); rrsc != "" {
+			globalRRStorageClass, err = parseStorageClass(rrsc)
+			fatalIf(err, "Invalid value set in environment variable %s.", reducedRedundancyStorageClassEnv)
+		}
+
+		// Validation is done after parsing both the storage classes. This is needed because we need one
+		// storage class value to deduce the correct value of the other storage class.
+		if globalRRStorageClass.Scheme != "" {
+			err := validateRRSParity(globalRRStorageClass.Parity, globalStandardStorageClass.Parity)
+			fatalIf(err, "Invalid value set in environment variable %s.", reducedRedundancyStorageClassEnv)
+			globalIsStorageClass = true
+		}
+
+		if globalStandardStorageClass.Scheme != "" {
+			err := validateSSParity(globalStandardStorageClass.Parity, globalRRStorageClass.Parity)
+			fatalIf(err, "Invalid value set in environment variable %s.", standardStorageClassEnv)
+			globalIsStorageClass = true
+		}
 	}
 }

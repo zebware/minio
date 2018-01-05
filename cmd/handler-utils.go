@@ -19,9 +19,14 @@ package cmd
 import (
 	"io"
 	"mime/multipart"
+	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
+
+	"github.com/minio/minio/pkg/errors"
+	httptracer "github.com/minio/minio/pkg/handlers"
 )
 
 // Parses location constraint from the incoming reader.
@@ -38,7 +43,7 @@ func parseLocationConstraint(r *http.Request) (location string, s3Error APIError
 	} // else for both err as nil or io.EOF
 	location = locationConstraint.Location
 	if location == "" {
-		location = serverConfig.GetRegion()
+		location = globalServerConfig.GetRegion()
 	}
 	return location, ErrNone
 }
@@ -46,7 +51,7 @@ func parseLocationConstraint(r *http.Request) (location string, s3Error APIError
 // Validates input location is same as configured region
 // of Minio server.
 func isValidLocation(location string) bool {
-	return serverConfig.GetRegion() == "" || serverConfig.GetRegion() == location
+	return globalServerConfig.GetRegion() == "" || globalServerConfig.GetRegion() == location
 }
 
 // Supported headers that needs to be extracted.
@@ -55,6 +60,7 @@ var supportedHeaders = []string{
 	"cache-control",
 	"content-encoding",
 	"content-disposition",
+	amzStorageClass,
 	// Add more supported headers here.
 }
 
@@ -108,10 +114,11 @@ var userMetadataKeyPrefixes = []string{
 // extractMetadataFromHeader extracts metadata from HTTP header.
 func extractMetadataFromHeader(header http.Header) (map[string]string, error) {
 	if header == nil {
-		return nil, traceError(errInvalidArgument)
+		return nil, errors.Trace(errInvalidArgument)
 	}
 	metadata := make(map[string]string)
-	// Save standard supported headers.
+
+	// Save all supported headers.
 	for _, supportedHeader := range supportedHeaders {
 		canonicalHeader := http.CanonicalHeaderKey(supportedHeader)
 		// HTTP headers are case insensitive, look for both canonical
@@ -122,10 +129,11 @@ func extractMetadataFromHeader(header http.Header) (map[string]string, error) {
 			metadata[supportedHeader] = header.Get(supportedHeader)
 		}
 	}
+
 	// Go through all other headers for any additional headers that needs to be saved.
 	for key := range header {
 		if key != http.CanonicalHeaderKey(key) {
-			return nil, traceError(errInvalidArgument)
+			return nil, errors.Trace(errInvalidArgument)
 		}
 		for _, prefix := range userMetadataKeyPrefixes {
 			if strings.HasPrefix(key, prefix) {
@@ -183,7 +191,7 @@ func validateFormFieldSize(formValues http.Header) error {
 	for k := range formValues {
 		// Check if value's field exceeds S3 limit
 		if int64(len(formValues.Get(k))) > maxFormFieldSize {
-			return traceError(errSizeUnexpected)
+			return errors.Trace(errSizeUnexpected)
 		}
 	}
 
@@ -212,7 +220,7 @@ func extractPostPolicyFormValues(form *multipart.Form) (filePart io.ReadCloser, 
 		canonicalFormName := http.CanonicalHeaderKey(k)
 		if canonicalFormName == "File" {
 			if len(v) == 0 {
-				return nil, "", 0, nil, traceError(errInvalidArgument)
+				return nil, "", 0, nil, errors.Trace(errInvalidArgument)
 			}
 			// Fetch fileHeader which has the uploaded file information
 			fileHeader := v[0]
@@ -221,17 +229,17 @@ func extractPostPolicyFormValues(form *multipart.Form) (filePart io.ReadCloser, 
 			// Open the uploaded part
 			filePart, err = fileHeader.Open()
 			if err != nil {
-				return nil, "", 0, nil, traceError(err)
+				return nil, "", 0, nil, errors.Trace(err)
 			}
 			// Compute file size
 			fileSize, err = filePart.(io.Seeker).Seek(0, 2)
 			if err != nil {
-				return nil, "", 0, nil, traceError(err)
+				return nil, "", 0, nil, errors.Trace(err)
 			}
 			// Reset Seek to the beginning
 			_, err = filePart.(io.Seeker).Seek(0, 0)
 			if err != nil {
-				return nil, "", 0, nil, traceError(err)
+				return nil, "", 0, nil, errors.Trace(err)
 			}
 			// File found and ready for reading
 			break
@@ -239,4 +247,47 @@ func extractPostPolicyFormValues(form *multipart.Form) (filePart io.ReadCloser, 
 	}
 
 	return filePart, fileName, fileSize, formValues, nil
+}
+
+// Log headers and body.
+func httpTraceAll(f http.HandlerFunc) http.HandlerFunc {
+	if !globalHTTPTrace {
+		return f
+	}
+	return httptracer.TraceReqHandlerFunc(f, os.Stdout, true)
+}
+
+// Log only the headers.
+func httpTraceHdrs(f http.HandlerFunc) http.HandlerFunc {
+	if !globalHTTPTrace {
+		return f
+	}
+	return httptracer.TraceReqHandlerFunc(f, os.Stdout, false)
+}
+
+// Returns "/bucketName/objectName" for path-style or virtual-host-style requests.
+func getResource(path string, host string, domain string) (string, error) {
+	if domain == "" {
+		return path, nil
+	}
+	// If virtual-host-style is enabled construct the "resource" properly.
+	if strings.Contains(host, ":") {
+		// In bucket.mydomain.com:9000, strip out :9000
+		var err error
+		if host, _, err = net.SplitHostPort(host); err != nil {
+			errorIf(err, "Unable to split %s", host)
+			return "", err
+		}
+	}
+	if !strings.HasSuffix(host, "."+domain) {
+		return path, nil
+	}
+	bucket := strings.TrimSuffix(host, "."+domain)
+	return slashSeparator + pathJoin(bucket, path), nil
+}
+
+// If none of the http routes match respond with MethodNotAllowed
+func notFoundHandler(w http.ResponseWriter, r *http.Request) {
+	writeErrorResponse(w, ErrMethodNotAllowed, r.URL)
+	return
 }

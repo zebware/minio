@@ -18,7 +18,6 @@ package cmd
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
 	"net"
 	"os"
@@ -30,6 +29,7 @@ import (
 	"time"
 
 	"github.com/minio/minio-go/pkg/set"
+	"github.com/minio/minio/pkg/errors"
 )
 
 const (
@@ -139,7 +139,7 @@ func (lc localAdminClient) ServerInfoData() (sid ServerInfoData, e error) {
 			Version:  Version,
 			CommitID: CommitID,
 			SQSARN:   arns,
-			Region:   serverConfig.GetRegion(),
+			Region:   globalServerConfig.GetRegion(),
 		},
 	}, nil
 }
@@ -158,11 +158,11 @@ func (rc remoteAdminClient) ServerInfoData() (sid ServerInfoData, e error) {
 
 // GetConfig - returns config.json of the local server.
 func (lc localAdminClient) GetConfig() ([]byte, error) {
-	if serverConfig == nil {
-		return nil, errors.New("config not present")
+	if globalServerConfig == nil {
+		return nil, fmt.Errorf("config not present")
 	}
 
-	return json.Marshal(serverConfig)
+	return json.Marshal(globalServerConfig)
 }
 
 // GetConfig - returns config.json of the remote server.
@@ -246,7 +246,7 @@ func makeAdminPeers(endpoints EndpointList) (adminPeerList adminPeers) {
 	})
 
 	hostSet := set.CreateStringSet(globalMinioAddr)
-	cred := serverConfig.GetCredential()
+	cred := globalServerConfig.GetCredential()
 	serviceEndpoint := path.Join(minioReservedBucketPath, adminPath)
 	for _, host := range GetRemotePeers(endpoints) {
 		if hostSet.Contains(host) {
@@ -483,7 +483,7 @@ func getPeerConfig(peers adminPeers) ([]byte, error) {
 	configJSON, err := getValidServerConfig(serverConfigs, errs)
 	if err != nil {
 		errorIf(err, "Unable to find a valid server config")
-		return nil, traceError(err)
+		return nil, errors.Trace(err)
 	}
 
 	// Return the config.json that was present quorum or more

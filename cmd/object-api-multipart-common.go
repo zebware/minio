@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2016 Minio, Inc.
+ * Minio Cloud Storage, (C) 2016, 2017 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -24,7 +24,15 @@ import (
 	"sort"
 	"time"
 
+	"github.com/minio/minio/pkg/errors"
 	"github.com/minio/minio/pkg/lock"
+)
+
+const (
+	// Expiry duration after which the multipart uploads are deemed stale.
+	multipartExpiry = time.Hour * 24 * 14 // 2 weeks.
+	// Cleanup interval when the stale multipart cleanup is initiated.
+	multipartCleanupInterval = time.Hour * 24 // 24 hrs.
 )
 
 // A uploadInfo represents the s3 compatible spec.
@@ -80,14 +88,14 @@ func (u *uploadsV1) WriteTo(lk *lock.LockedFile) (n int64, err error) {
 	var uplBytes []byte
 	uplBytes, err = json.Marshal(u)
 	if err != nil {
-		return 0, traceError(err)
+		return 0, errors.Trace(err)
 	}
 	if err = lk.Truncate(0); err != nil {
-		return 0, traceError(err)
+		return 0, errors.Trace(err)
 	}
 	_, err = lk.Write(uplBytes)
 	if err != nil {
-		return 0, traceError(err)
+		return 0, errors.Trace(err)
 	}
 	return int64(len(uplBytes)), nil
 }
@@ -96,18 +104,18 @@ func (u *uploadsV1) ReadFrom(lk *lock.LockedFile) (n int64, err error) {
 	var uploadIDBytes []byte
 	fi, err := lk.Stat()
 	if err != nil {
-		return 0, traceError(err)
+		return 0, errors.Trace(err)
 	}
 	uploadIDBytes, err = ioutil.ReadAll(io.NewSectionReader(lk, 0, fi.Size()))
 	if err != nil {
-		return 0, traceError(err)
+		return 0, errors.Trace(err)
 	}
 	if len(uploadIDBytes) == 0 {
-		return 0, traceError(io.EOF)
+		return 0, errors.Trace(io.EOF)
 	}
 	// Decode `uploads.json`.
 	if err = json.Unmarshal(uploadIDBytes, u); err != nil {
-		return 0, traceError(err)
+		return 0, errors.Trace(err)
 	}
 	return int64(len(uploadIDBytes)), nil
 }
@@ -118,12 +126,12 @@ func readUploadsJSON(bucket, object string, disk StorageAPI) (uploadIDs uploadsV
 	// Reads entire `uploads.json`.
 	buf, err := disk.ReadAll(minioMetaMultipartBucket, uploadJSONPath)
 	if err != nil {
-		return uploadsV1{}, traceError(err)
+		return uploadsV1{}, errors.Trace(err)
 	}
 
 	// Decode `uploads.json`.
 	if err = json.Unmarshal(buf, &uploadIDs); err != nil {
-		return uploadsV1{}, traceError(err)
+		return uploadsV1{}, errors.Trace(err)
 	}
 
 	// Success.
@@ -142,30 +150,34 @@ func writeUploadJSON(u *uploadsV1, uploadsPath, tmpPath string, disk StorageAPI)
 	// Serialize to prepare to write to disk.
 	uplBytes, wErr := json.Marshal(&u)
 	if wErr != nil {
-		return traceError(wErr)
+		return errors.Trace(wErr)
 	}
 
 	// Write `uploads.json` to disk. First to tmp location and then rename.
 	if wErr = disk.AppendFile(minioMetaTmpBucket, tmpPath, uplBytes); wErr != nil {
-		return traceError(wErr)
+		return errors.Trace(wErr)
 	}
 	wErr = disk.RenameFile(minioMetaTmpBucket, tmpPath, minioMetaMultipartBucket, uploadsPath)
 	if wErr != nil {
 		if dErr := disk.DeleteFile(minioMetaTmpBucket, tmpPath); dErr != nil {
 			// we return the most recent error.
-			return traceError(dErr)
+			return errors.Trace(dErr)
 		}
-		return traceError(wErr)
+		return errors.Trace(wErr)
 	}
 	return nil
 }
 
 // listMultipartUploadIDs - list all the upload ids from a marker up to 'count'.
-func listMultipartUploadIDs(bucketName, objectName, uploadIDMarker string, count int, disk StorageAPI) ([]uploadMetadata, bool, error) {
-	var uploads []uploadMetadata
+func listMultipartUploadIDs(bucketName, objectName, uploadIDMarker string, count int, disk StorageAPI) ([]MultipartInfo, bool, error) {
+	var uploads []MultipartInfo
 	// Read `uploads.json`.
 	uploadsJSON, err := readUploadsJSON(bucketName, objectName, disk)
 	if err != nil {
+		switch errors.Cause(err) {
+		case errFileNotFound, errFileAccessDenied:
+			return nil, true, nil
+		}
 		return nil, false, err
 	}
 	index := 0
@@ -179,7 +191,7 @@ func listMultipartUploadIDs(bucketName, objectName, uploadIDMarker string, count
 		}
 	}
 	for index < len(uploadsJSON.Uploads) {
-		uploads = append(uploads, uploadMetadata{
+		uploads = append(uploads, MultipartInfo{
 			Object:    objectName,
 			UploadID:  uploadsJSON.Uploads[index].UploadID,
 			Initiated: uploadsJSON.Uploads[index].Initiated,
@@ -192,4 +204,59 @@ func listMultipartUploadIDs(bucketName, objectName, uploadIDMarker string, count
 	}
 	end := (index == len(uploadsJSON.Uploads))
 	return uploads, end, nil
+}
+
+// List multipart uploads func defines the function signature of list multipart recursive function.
+type listMultipartUploadsFunc func(bucket, prefix, keyMarker, uploadIDMarker, delimiter string, maxUploads int) (ListMultipartsInfo, error)
+
+// Removes multipart uploads if any older than `expiry` duration
+// on all buckets for every `cleanupInterval`, this function is
+// blocking and should be run in a go-routine.
+func cleanupStaleMultipartUploads(cleanupInterval, expiry time.Duration, obj ObjectLayer, listFn listMultipartUploadsFunc, doneCh chan struct{}) {
+	ticker := time.NewTicker(cleanupInterval)
+	for {
+		select {
+		case <-doneCh:
+			// Stop the timer.
+			ticker.Stop()
+			return
+		case <-ticker.C:
+			bucketInfos, err := obj.ListBuckets()
+			if err != nil {
+				errorIf(err, "Unable to list buckets")
+				continue
+			}
+			for _, bucketInfo := range bucketInfos {
+				cleanupStaleMultipartUpload(bucketInfo.Name, expiry, obj, listFn)
+			}
+		}
+	}
+}
+
+// Removes multipart uploads if any older than `expiry` duration in a given bucket.
+func cleanupStaleMultipartUpload(bucket string, expiry time.Duration, obj ObjectLayer, listFn listMultipartUploadsFunc) (err error) {
+	var lmi ListMultipartsInfo
+	for {
+		// List multipart uploads in a bucket 1000 at a time
+		prefix := ""
+		lmi, err = listFn(bucket, prefix, lmi.KeyMarker, lmi.UploadIDMarker, "", 1000)
+		if err != nil {
+			errorIf(err, "Unable to list uploads")
+			return err
+		}
+
+		// Remove uploads (and its parts) older than expiry duration.
+		for _, upload := range lmi.Uploads {
+			if time.Since(upload.Initiated) > expiry {
+				obj.AbortMultipartUpload(bucket, upload.Object, upload.UploadID)
+			}
+		}
+
+		// No more incomplete uploads remain, break and return.
+		if !lmi.IsTruncated {
+			break
+		}
+	}
+
+	return nil
 }

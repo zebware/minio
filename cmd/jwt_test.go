@@ -20,6 +20,8 @@ import (
 	"net/http"
 	"os"
 	"testing"
+
+	"github.com/minio/minio/pkg/auth"
 )
 
 func testAuthenticate(authType string, t *testing.T) {
@@ -28,12 +30,8 @@ func testAuthenticate(authType string, t *testing.T) {
 		t.Fatalf("unable initialize config file, %s", err)
 	}
 	defer os.RemoveAll(testPath)
-	// Create access and secret keys in length, 300 and 600
-	cred, err := getNewCredential(300, 600)
-	if err != nil {
-		t.Fatalf("unable to get new credential, %v", err)
-	}
-	serverConfig.SetCredential(cred)
+	cred := auth.MustGetNewCredentials()
+	globalServerConfig.SetCredential(cred)
 
 	// Define test cases.
 	testCases := []struct {
@@ -42,9 +40,9 @@ func testAuthenticate(authType string, t *testing.T) {
 		expectedErr error
 	}{
 		// Access key (less than 5 chrs) too small.
-		{"user", cred.SecretKey, errInvalidAccessKeyLength},
+		{"user", cred.SecretKey, auth.ErrInvalidAccessKeyLength},
 		// Secret key (less than 8 chrs) too small.
-		{cred.AccessKey, "pass", errInvalidSecretKeyLength},
+		{cred.AccessKey, "pass", auth.ErrInvalidSecretKeyLength},
 		// Authentication error.
 		{"myuser", "mypassword", errInvalidAccessKeyID},
 		// Authentication error.
@@ -97,7 +95,7 @@ func TestWebRequestAuthenticate(t *testing.T) {
 	}
 	defer os.RemoveAll(testPath)
 
-	creds := serverConfig.GetCredential()
+	creds := globalServerConfig.GetCredential()
 	token, err := getTokenString(creds.AccessKey, creds.SecretKey)
 	if err != nil {
 		t.Fatalf("unable get token %s", err)
@@ -148,7 +146,7 @@ func BenchmarkAuthenticateNode(b *testing.B) {
 	}
 	defer os.RemoveAll(testPath)
 
-	creds := serverConfig.GetCredential()
+	creds := globalServerConfig.GetCredential()
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
@@ -163,7 +161,7 @@ func BenchmarkAuthenticateWeb(b *testing.B) {
 	}
 	defer os.RemoveAll(testPath)
 
-	creds := serverConfig.GetCredential()
+	creds := globalServerConfig.GetCredential()
 	b.ResetTimer()
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
