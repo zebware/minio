@@ -112,6 +112,8 @@ func TestXLDeleteObjectBasic(t *testing.T) {
 }
 
 func TestXLDeleteObjectDiskNotFound(t *testing.T) {
+	// Reset global storage class flags
+	resetGlobalStorageEnvs()
 	// Create an instance of xl backend.
 	obj, fsDirs, err := prepareXL16()
 	if err != nil {
@@ -204,7 +206,7 @@ func TestGetObjectNoQuorum(t *testing.T) {
 			}
 		}
 		// Fetch object from store.
-		err = xl.GetObject(bucket, object, 0, int64(len("abcd")), ioutil.Discard)
+		err = xl.GetObject(bucket, object, 0, int64(len("abcd")), ioutil.Discard, "")
 		err = errors.Cause(err)
 		if err != toObjectErr(errXLReadQuorum, bucket, object) {
 			t.Errorf("Expected putObject to fail with %v, but failed with %v", toObjectErr(errXLWriteQuorum, bucket, object), err)
@@ -314,7 +316,7 @@ func TestHealing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err = xl.HealObject(bucket, object)
+	_, err = xl.HealObject(bucket, object, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -338,7 +340,7 @@ func TestHealing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, _, err = xl.HealObject(bucket, object)
+	_, err = xl.HealObject(bucket, object, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -360,7 +362,7 @@ func TestHealing(t *testing.T) {
 		t.Fatal(err)
 	}
 	// This would create the bucket.
-	err = xl.HealBucket(bucket)
+	_, err = xl.HealBucket(bucket, false)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -123,8 +123,8 @@ var (
 	globalHTTPServerErrorCh = make(chan error)
 	globalOSSignalCh        = make(chan os.Signal, 1)
 
-	// Enable HTTP request/response headers and body logging.
-	globalHTTPTrace bool
+	// File to log HTTP request/response headers and body.
+	globalHTTPTraceFile *os.File
 
 	// List of admin peers.
 	globalAdminPeers = adminPeers{}
@@ -174,6 +174,7 @@ var (
 	colorBold   = color.New(color.Bold).SprintFunc()
 	colorBlue   = color.New(color.FgBlue).SprintfFunc()
 	colorYellow = color.New(color.FgYellow).SprintfFunc()
+	colorRed    = color.New(color.FgRed).SprintfFunc()
 )
 
 // Returns minio global information, as a key value map.

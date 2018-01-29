@@ -33,13 +33,39 @@ go run generate_cert.go -ca --host "10.10.0.3"
 
 ### Using OpenSSL
 
-Generate the private key:
+**Generate the private key**:
 
+1. **ECDSA:**  
+```sh
+openssl ecparam -genkey -name prime256v1 -out private.key
+```
+or protect the private key additionally with a password:  
+```sh
+openssl ecparam -genkey -name prime256v1 | openssl ec -aes256 -out private.key -passout pass:PASSWORD
+```
+2. **RSA:**
 ```sh
 openssl genrsa -out private.key 2048
+```  
+or protect the private key additionally with a password:  
+```sh
+openssl genrsa -aes256 -out private.key 2048 -passout pass:PASSWORD
 ```
 
-Generate the self-signed certificate:
+If a password-protected private key is used the password must be provided through the environment variable `MINIO_CERT_PASSWD`:
+```sh
+export MINIO_CERT_PASSWD=PASSWORD
+``` 
+Please use your own password instead of PASSWORD.
+
+**Notice:**  
+The OpenSSL default format for encrypted private keys is PKCS-8. Minio only supports PKCS-1 encrypted private keys.
+An encrypted private PKCS-8 formated RSA key can be converted to an encrypted private PKCS-1 formated RSA key by:
+```sh
+openssl rsa -in private-pkcs8-key.key -aes256 -passout pass:PASSWORD -out private.key
+```  
+
+**Generate the self-signed certificate**:
 
 ```sh
 openssl req -new -x509 -days 3650 -key private.key -out public.crt -subj "/C=US/ST=state/L=location/O=organization/CN=domain"

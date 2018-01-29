@@ -132,6 +132,13 @@ func serverMain(ctx *cli.Context) {
 		cli.ShowCommandHelpAndExit(ctx, "server", 1)
 	}
 
+	// Get "json" flag from command line argument and
+	// enable json and quite modes if jason flag is turned on.
+	jsonFlag := ctx.Bool("json") || ctx.GlobalBool("json")
+	if jsonFlag {
+		log.EnableJSON()
+	}
+
 	// Get quiet flag from command line argument.
 	quietFlag := ctx.Bool("quiet") || ctx.GlobalBool("quiet")
 	if quietFlag {
@@ -179,12 +186,15 @@ func serverMain(ctx *cli.Context) {
 
 	// Set nodes for dsync for distributed setup.
 	if globalIsDistXL {
-		clnts, myNode := newDsyncNodes(globalEndpoints)
-		fatalIf(dsync.Init(clnts, myNode), "Unable to initialize distributed locking clients")
+		globalDsync, err = dsync.New(newDsyncNodes(globalEndpoints))
+		fatalIf(err, "Unable to initialize distributed locking clients")
 	}
 
 	// Initialize name space lock.
 	initNSLock(globalIsDistXL)
+
+	// Init global heal state
+	initAllHealState(globalIsXL)
 
 	// Configure server.
 	var handler http.Handler

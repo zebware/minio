@@ -19,7 +19,6 @@ package cmd
 import (
 	"bufio"
 	"crypto"
-	_ "crypto/sha256" // Needed for sha256 hash verifier.
 	"encoding/hex"
 	"fmt"
 	"io/ioutil"
@@ -33,6 +32,7 @@ import (
 	"github.com/fatih/color"
 	"github.com/inconshreveable/go-update"
 	"github.com/minio/cli"
+	_ "github.com/minio/sha256-simd" // Needed for sha256 hash verifier.
 	"github.com/segmentio/go-prompt"
 )
 
@@ -44,7 +44,7 @@ var updateCmd = cli.Command{
 	Flags: []cli.Flag{
 		cli.BoolFlag{
 			Name:  "quiet",
-			Usage: "Disable any update messages.",
+			Usage: "Disable any update prompt message.",
 		},
 	},
 	CustomHelpTemplate: `Name:
@@ -63,7 +63,7 @@ EXIT STATUS:
 
 EXAMPLES:
    1. Check and update minio:
-       $ {{.HelpName}
+       $ {{.HelpName}}
 `,
 }
 
@@ -476,7 +476,7 @@ func shouldUpdate(quiet bool, sha256Hex string, latestReleaseTime time.Time) (ok
 
 var greenColorSprintf = color.New(color.FgGreen, color.Bold).SprintfFunc()
 
-func mainUpdate(ctx *cli.Context) error {
+func mainUpdate(ctx *cli.Context) {
 	if len(ctx.Args()) != 0 {
 		cli.ShowCommandHelpAndExit(ctx, "update", -1)
 	}
@@ -498,7 +498,7 @@ func mainUpdate(ctx *cli.Context) error {
 	// Nothing to update running the latest release.
 	if updateMsg == "" {
 		log.Println(greenColorSprintf("You are already running the most recent version of ‘minio’."))
-		return nil
+		os.Exit(0)
 	}
 
 	log.Println(updateMsg)
@@ -512,6 +512,6 @@ func mainUpdate(ctx *cli.Context) error {
 			os.Exit(-1)
 		}
 		log.Println(successMsg)
+		os.Exit(1)
 	}
-	return nil
 }

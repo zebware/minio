@@ -21,7 +21,6 @@ import (
 	"encoding/json"
 	"io/ioutil"
 	"net/http"
-	"net/url"
 	"time"
 )
 
@@ -51,10 +50,10 @@ type StorageInfo struct {
 		Type BackendType
 
 		// Following fields are only meaningful if BackendType is Erasure.
-		OnlineDisks  int // Online disks during server startup.
-		OfflineDisks int // Offline disks during server startup.
-		ReadQuorum   int // Minimum disks required for successful read operations.
-		WriteQuorum  int // Minimum disks required for successful write operations.
+		OnlineDisks      int // Online disks during server startup.
+		OfflineDisks     int // Offline disks during server startup.
+		StandardSCParity int // Parity disks for currently configured Standard storage class.
+		RRSCParity       int // Parity disks for currently configured Reduced Redundancy storage class.
 	}
 }
 
@@ -115,13 +114,7 @@ type ServerInfo struct {
 // ServerInfo - Connect to a minio server and call Server Info Management API
 // to fetch server's information represented by ServerInfo structure
 func (adm *AdminClient) ServerInfo() ([]ServerInfo, error) {
-	// Prepare web service request
-	reqData := requestData{}
-	reqData.queryValues = make(url.Values)
-	reqData.queryValues.Set("info", "")
-	reqData.customHeaders = make(http.Header)
-
-	resp, err := adm.executeMethod("GET", reqData)
+	resp, err := adm.executeMethod("GET", requestData{relPath: "/v1/info"})
 	defer closeResponse(resp)
 	if err != nil {
 		return nil, err

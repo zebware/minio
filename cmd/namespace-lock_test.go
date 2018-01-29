@@ -21,8 +21,26 @@ import (
 	"time"
 )
 
+// WARNING:
+//
+// Expected source line number is hard coded, 32, in the
+// following test. Adding new code before this test or changing its
+// position will cause the line number to change and the test to FAIL
+// Tests getSource().
+func TestGetSource(t *testing.T) {
+	currentSource := func() string { return getSource() }
+	gotSource := currentSource()
+	// Hard coded line number, 32, in the "expectedSource" value
+	expectedSource := "[namespace-lock_test.go:32:TestGetSource()]"
+	if gotSource != expectedSource {
+		t.Errorf("expected : %s, got : %s", expectedSource, gotSource)
+	}
+}
+
 // Tests functionality provided by namespace lock.
 func TestNamespaceLockTest(t *testing.T) {
+	isDistXL := false
+	initNSLock(isDistXL)
 	// List of test cases.
 	testCases := []struct {
 		lk               func(s1, s2, s3 string, t time.Duration) bool
@@ -139,7 +157,8 @@ func TestNamespaceLockTest(t *testing.T) {
 }
 
 func TestNamespaceLockTimedOut(t *testing.T) {
-
+	isDistXL := false
+	initNSLock(isDistXL)
 	// Get write lock
 	if !globalNSMutex.Lock("my-bucket", "my-object", "abc", 60*time.Second) {
 		t.Fatalf("Failed to acquire lock")
@@ -183,7 +202,8 @@ func TestNamespaceLockTimedOut(t *testing.T) {
 
 // Tests functionality to forcefully unlock locks.
 func TestNamespaceForceUnlockTest(t *testing.T) {
-
+	isDistXL := false
+	initNSLock(isDistXL)
 	// Create lock.
 	lock := globalNSMutex.NewNSLock("bucket", "object")
 	if lock.GetLock(newDynamicTimeout(60*time.Second, time.Second)) != nil {

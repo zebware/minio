@@ -18,14 +18,15 @@ package madmin
 
 import (
 	"crypto/md5"
-	"crypto/sha256"
-	"encoding/xml"
+	"encoding/json"
 	"io"
 	"io/ioutil"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
+
+	sha256 "github.com/minio/sha256-simd"
 
 	"github.com/minio/minio-go/pkg/s3utils"
 )
@@ -44,9 +45,9 @@ func sumMD5(data []byte) []byte {
 	return hash.Sum(nil)
 }
 
-// xmlDecoder provide decoded value in xml.
-func xmlDecoder(body io.Reader, v interface{}) error {
-	d := xml.NewDecoder(body)
+// jsonDecoder decode json to go type.
+func jsonDecoder(body io.Reader, v interface{}) error {
+	d := json.NewDecoder(body)
 	return d.Decode(v)
 }
 

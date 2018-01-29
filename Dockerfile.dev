@@ -1,4 +1,4 @@
-FROM golang:1.9.1-alpine3.6
+FROM golang:1.9.2-alpine3.6
 
 MAINTAINER Minio Inc <dev@minio.io>
 
@@ -6,6 +6,8 @@ ENV GOPATH /go
 ENV PATH $PATH:$GOPATH/bin
 ENV CGO_ENABLED 0
 ENV MINIO_UPDATE off
+ENV MINIO_ACCESS_KEY_FILE=access_key \
+    MINIO_SECRET_KEY_FILE=secret_key
 
 WORKDIR /go/src/github.com/minio/
 

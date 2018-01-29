@@ -1,22 +1,30 @@
+//
+// Copyright (c) 2018, Joyent, Inc. All rights reserved.
+//
+// This Source Code Form is subject to the terms of the Mozilla Public
+// License, v. 2.0. If a copy of the MPL was not distributed with this
+// file, You can obtain one at http://mozilla.org/MPL/2.0/.
+//
+
 package authentication
 
 import (
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/base64"
-	"errors"
 	"fmt"
 	"net"
 	"os"
+	"path"
 	"strings"
 
-	"github.com/hashicorp/errwrap"
+	pkgerrors "github.com/pkg/errors"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/agent"
 )
 
 var (
-	ErrUnsetEnvVar = errors.New("SSH_AUTH_SOCK is not set")
+	ErrUnsetEnvVar = pkgerrors.New("environment variable SSH_AUTH_SOCK not set")
 )
 
 type SSHAgentSigner struct {
@@ -24,13 +32,20 @@ type SSHAgentSigner struct {
 	keyFingerprint          string
 	algorithm               string
 	accountName             string
+	userName                string
 	keyIdentifier           string
 
 	agent agent.Agent
 	key   ssh.PublicKey
 }
 
-func NewSSHAgentSigner(keyFingerprint, accountName string) (*SSHAgentSigner, error) {
+type SSHAgentSignerInput struct {
+	KeyID       string
+	AccountName string
+	Username    string
+}
+
+func NewSSHAgentSigner(input SSHAgentSignerInput) (*SSHAgentSigner, error) {
 	sshAgentAddress, agentOk := os.LookupEnv("SSH_AUTH_SOCK")
 	if !agentOk {
 		return nil, ErrUnsetEnvVar
@@ -38,14 +53,14 @@ func NewSSHAgentSigner(keyFingerprint, accountName string) (*SSHAgentSigner, err
 
 	conn, err := net.Dial("unix", sshAgentAddress)
 	if err != nil {
-		return nil, errwrap.Wrapf("Error dialing SSH agent: {{err}}", err)
+		return nil, pkgerrors.Wrap(err, "unable to dial SSH agent")
 	}
 
 	ag := agent.NewClient(conn)
 
 	signer := &SSHAgentSigner{
-		keyFingerprint: keyFingerprint,
-		accountName:    accountName,
+		keyFingerprint: input.KeyID,
+		accountName:    input.AccountName,
 		agent:          ag,
 	}
 
@@ -55,7 +70,12 @@ func NewSSHAgentSigner(keyFingerprint, accountName string) (*SSHAgentSigner, err
 	}
 	signer.key = matchingKey
 	signer.formattedKeyFingerprint = formatPublicKeyFingerprint(signer.key, true)
-	signer.keyIdentifier = fmt.Sprintf("/%s/keys/%s", signer.accountName, signer.formattedKeyFingerprint)
+	if input.Username != "" {
+		signer.userName = input.Username
+		signer.keyIdentifier = path.Join("/", signer.accountName, "users", input.Username, "keys", signer.formattedKeyFingerprint)
+	} else {
+		signer.keyIdentifier = path.Join("/", signer.accountName, "keys", signer.formattedKeyFingerprint)
+	}
 
 	_, algorithm, err := signer.SignRaw("HelloWorld")
 	if err != nil {
@@ -69,7 +89,7 @@ func NewSSHAgentSigner(keyFingerprint, accountName string) (*SSHAgentSigner, err
 func (s *SSHAgentSigner) MatchKey() (ssh.PublicKey, error) {
 	keys, err := s.agent.List()
 	if err != nil {
-		return nil, errwrap.Wrapf("Error listing keys in SSH Agent: %s", err)
+		return nil, pkgerrors.Wrap(err, "unable to list keys in SSH Agent")
 	}
 
 	keyFingerprintStripped := strings.TrimPrefix(s.keyFingerprint, "MD5:")
@@ -103,12 +123,12 @@ func (s *SSHAgentSigner) Sign(dateHeader string) (string, error) {
 
 	signature, err := s.agent.Sign(s.key, []byte(fmt.Sprintf("%s: %s", headerName, dateHeader)))
 	if err != nil {
-		return "", errwrap.Wrapf("Error signing date header: {{err}}", err)
+		return "", pkgerrors.Wrap(err, "unable to sign date header")
 	}
 
 	keyFormat, err := keyFormatToKeyType(signature.Format)
 	if err != nil {
-		return "", errwrap.Wrapf("Error reading signature: {{err}}", err)
+		return "", pkgerrors.Wrap(err, "unable to format signature")
 	}
 
 	var authSignature httpAuthSignature
@@ -116,12 +136,12 @@ func (s *SSHAgentSigner) Sign(dateHeader string) (string, error) {
 	case "rsa":
 		authSignature, err = newRSASignature(signature.Blob)
 		if err != nil {
-			return "", errwrap.Wrapf("Error reading signature: {{err}}", err)
+			return "", pkgerrors.Wrap(err, "unable to read RSA signature")
 		}
 	case "ecdsa":
 		authSignature, err = newECDSASignature(signature.Blob)
 		if err != nil {
-			return "", errwrap.Wrapf("Error reading signature: {{err}}", err)
+			return "", pkgerrors.Wrap(err, "unable to read ECDSA signature")
 		}
 	default:
 		return "", fmt.Errorf("Unsupported algorithm from SSH agent: %s", signature.Format)
@@ -134,12 +154,12 @@ func (s *SSHAgentSigner) Sign(dateHeader string) (string, error) {
 func (s *SSHAgentSigner) SignRaw(toSign string) (string, string, error) {
 	signature, err := s.agent.Sign(s.key, []byte(toSign))
 	if err != nil {
-		return "", "", errwrap.Wrapf("Error signing string: {{err}}", err)
+		return "", "", pkgerrors.Wrap(err, "unable to sign string")
 	}
 
 	keyFormat, err := keyFormatToKeyType(signature.Format)
 	if err != nil {
-		return "", "", errwrap.Wrapf("Error reading signature: {{err}}", err)
+		return "", "", pkgerrors.Wrap(err, "unable to format key")
 	}
 
 	var authSignature httpAuthSignature
@@ -147,12 +167,12 @@ func (s *SSHAgentSigner) SignRaw(toSign string) (string, string, error) {
 	case "rsa":
 		authSignature, err = newRSASignature(signature.Blob)
 		if err != nil {
-			return "", "", errwrap.Wrapf("Error reading signature: {{err}}", err)
+			return "", "", pkgerrors.Wrap(err, "unable to read RSA signature")
 		}
 	case "ecdsa":
 		authSignature, err = newECDSASignature(signature.Blob)
 		if err != nil {
-			return "", "", errwrap.Wrapf("Error reading signature: {{err}}", err)
+			return "", "", pkgerrors.Wrap(err, "unable to read ECDSA signature")
 		}
 	default:
 		return "", "", fmt.Errorf("Unsupported algorithm from SSH agent: %s", signature.Format)

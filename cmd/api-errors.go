@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"encoding/xml"
+	"fmt"
 	"net/http"
 
 	"github.com/minio/minio/pkg/auth"
@@ -40,8 +41,8 @@ type APIErrorResponse struct {
 	Key        string
 	BucketName string
 	Resource   string
-	RequestID  string `xml:"RequestId"`
-	HostID     string `xml:"HostId"`
+	RequestID  string `xml:"RequestId" json:"RequestId"`
+	HostID     string `xml:"HostId" json:"HostId"`
 }
 
 // APIErrorCode type of error status.
@@ -123,6 +124,7 @@ const (
 	ErrUnsupportedMetadata
 	ErrMaximumExpires
 	ErrSlowDown
+	ErrInvalidPrefixMarker
 	// Add new error codes here.
 
 	// Server-Side-Encryption (with Customer provided key) related API errors.
@@ -156,6 +158,7 @@ const (
 	ErrReadQuorum
 	ErrWriteQuorum
 	ErrStorageFull
+	ErrRequestBodyParse
 	ErrObjectExistsAsDirectory
 	ErrPolicyNesting
 	ErrInvalidObjectName
@@ -172,12 +175,21 @@ const (
 	// Please open a https://github.com/minio/minio/issues before adding
 	// new error codes here.
 
+	ErrMalformedJSON
 	ErrAdminInvalidAccessKey
 	ErrAdminInvalidSecretKey
 	ErrAdminConfigNoQuorum
+	ErrAdminConfigTooLarge
+	ErrAdminConfigBadJSON
 	ErrAdminCredentialsMismatch
 	ErrInsecureClientRequest
 	ErrObjectTampered
+	ErrHealNotImplemented
+	ErrHealNoSuchProcess
+	ErrHealInvalidClientToken
+	ErrHealMissingBucket
+	ErrHealAlreadyRunning
+	ErrHealOverlappingPaths
 )
 
 // error code to APIError structure, these fields carry respective
@@ -520,6 +532,12 @@ var errorCodeResponse = map[APIErrorCode]APIError{
 		Description:    "Please reduce your request",
 		HTTPStatusCode: http.StatusServiceUnavailable,
 	},
+	ErrInvalidPrefixMarker: {
+		Code:           "InvalidPrefixMarker",
+		Description:    "Invalid marker prefix combination",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
+
 	// FIXME: Actual XML error response also contains the header which missed in list of signed header parameters.
 	ErrUnsignedHeaders: {
 		Code:           "AccessDenied",
@@ -662,6 +680,11 @@ var errorCodeResponse = map[APIErrorCode]APIError{
 		Description:    "Storage backend has reached its minimum free disk threshold. Please delete a few objects to proceed.",
 		HTTPStatusCode: http.StatusInternalServerError,
 	},
+	ErrRequestBodyParse: {
+		Code:           "XMinioRequestBodyParse",
+		Description:    "The request body failed to parse.",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
 	ErrObjectExistsAsDirectory: {
 		Code:           "XMinioObjectExistsAsDirectory",
 		Description:    "Object name already exists as a directory.",
@@ -697,6 +720,11 @@ var errorCodeResponse = map[APIErrorCode]APIError{
 		Description:    "Server not initialized, please try again.",
 		HTTPStatusCode: http.StatusServiceUnavailable,
 	},
+	ErrMalformedJSON: {
+		Code:           "XMinioMalformedJSON",
+		Description:    "The JSON you provided was not well-formed or did not validate against our published format.",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
 	ErrAdminInvalidAccessKey: {
 		Code:           "XMinioAdminInvalidAccessKey",
 		Description:    "The access key is invalid.",
@@ -711,6 +739,17 @@ var errorCodeResponse = map[APIErrorCode]APIError{
 		Code:           "XMinioAdminConfigNoQuorum",
 		Description:    "Configuration update failed because server quorum was not met",
 		HTTPStatusCode: http.StatusServiceUnavailable,
+	},
+	ErrAdminConfigTooLarge: {
+		Code: "XMinioAdminConfigTooLarge",
+		Description: fmt.Sprintf("Configuration data provided exceeds the allowed maximum of %d bytes",
+			maxConfigJSONSize),
+		HTTPStatusCode: http.StatusBadRequest,
+	},
+	ErrAdminConfigBadJSON: {
+		Code:           "XMinioAdminConfigBadJSON",
+		Description:    "JSON configuration provided has objects with duplicate keys",
+		HTTPStatusCode: http.StatusBadRequest,
 	},
 	ErrAdminCredentialsMismatch: {
 		Code:           "XMinioAdminCredentialsMismatch",
@@ -753,6 +792,36 @@ var errorCodeResponse = map[APIErrorCode]APIError{
 	ErrInvalidRequest: {
 		Code:           "InvalidRequest",
 		Description:    "Invalid Request",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
+	ErrHealNotImplemented: {
+		Code:           "XMinioHealNotImplemented",
+		Description:    "This server does not implement heal functionality.",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
+	ErrHealNoSuchProcess: {
+		Code:           "XMinioHealNoSuchProcess",
+		Description:    "No such heal process is running on the server",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
+	ErrHealInvalidClientToken: {
+		Code:           "XMinioHealInvalidClientToken",
+		Description:    "Client token mismatch",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
+	ErrHealMissingBucket: {
+		Code:           "XMinioHealMissingBucket",
+		Description:    "A heal start request with a non-empty object-prefix parameter requires a bucket to be specified.",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
+	ErrHealAlreadyRunning: {
+		Code:           "XMinioHealAlreadyRunning",
+		Description:    "",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
+	ErrHealOverlappingPaths: {
+		Code:           "XMinioHealOverlappingPaths",
+		Description:    "",
 		HTTPStatusCode: http.StatusBadRequest,
 	},
 

@@ -18,15 +18,11 @@ package cmd
 
 import (
 	"bytes"
+	"errors"
 	"io/ioutil"
 	"net/http"
 	"strings"
 )
-
-// Verify if the request http Header "x-amz-content-sha256" == "UNSIGNED-PAYLOAD"
-func isRequestUnsignedPayload(r *http.Request) bool {
-	return r.Header.Get("x-amz-content-sha256") == unsignedPayload
-}
 
 // Verify if request has JWT.
 func isRequestJWT(r *http.Request) bool {
@@ -58,13 +54,14 @@ func isRequestPresignedSignatureV2(r *http.Request) bool {
 
 // Verify if request has AWS Post policy Signature Version '4'.
 func isRequestPostPolicySignatureV4(r *http.Request) bool {
-	return strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") && r.Method == httpPOST
+	return strings.Contains(r.Header.Get("Content-Type"), "multipart/form-data") &&
+		r.Method == http.MethodPost
 }
 
 // Verify if the request has AWS Streaming Signature Version '4'. This is only valid for 'PUT' operation.
 func isRequestSignStreamingV4(r *http.Request) bool {
 	return r.Header.Get("x-amz-content-sha256") == streamingContentSHA256 &&
-		r.Method == httpPUT
+		r.Method == http.MethodPut
 }
 
 // Authorization type.
@@ -103,6 +100,19 @@ func getRequestAuthType(r *http.Request) authType {
 		return authTypeAnonymous
 	}
 	return authTypeUnknown
+}
+
+// checkAdminRequestAuthType checks whether the request is a valid signature V2 or V4 request.
+// It does not accept presigned or JWT or anonymous requests.
+func checkAdminRequestAuthType(r *http.Request, region string) APIErrorCode {
+	s3Err := ErrAccessDenied
+	if getRequestAuthType(r) == authTypeSigned { // we only support V4 (no presign)
+		s3Err = isReqAuthenticated(r, region)
+	}
+	if s3Err != ErrNone {
+		errorIf(errors.New(getAPIError(s3Err).Description), "%s", dumpRequest(r))
+	}
+	return s3Err
 }
 
 func checkRequestAuthType(r *http.Request, bucket, policyAction, region string) APIErrorCode {

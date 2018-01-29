@@ -19,6 +19,8 @@ package cmd
 import (
 	"errors"
 	pathutil "path"
+	"runtime"
+	"strings"
 	"sync"
 
 	"fmt"
@@ -26,13 +28,17 @@ import (
 
 	"github.com/minio/dsync"
 	"github.com/minio/lsync"
+	"github.com/minio/minio-go/pkg/set"
 )
 
 // Global name space lock.
 var globalNSMutex *nsLockMap
 
-// Global lock servers
-var globalLockServers []*lockServer
+// Global lock server one per server.
+var globalLockServer *lockServer
+
+// Instance of dsync for distributed clients.
+var globalDsync *dsync.Dsync
 
 // RWLocker - locker interface to introduce GetRLock, RUnlock.
 type RWLocker interface {
@@ -54,47 +60,49 @@ type RWLockerSync interface {
 // Returns lock clients and the node index for the current server.
 func newDsyncNodes(endpoints EndpointList) (clnts []dsync.NetLocker, myNode int) {
 	cred := globalServerConfig.GetCredential()
-	clnts = make([]dsync.NetLocker, len(endpoints))
 	myNode = -1
-	for index, endpoint := range endpoints {
+	seenHosts := set.NewStringSet()
+	for _, endpoint := range endpoints {
+		if seenHosts.Contains(endpoint.Host) {
+			continue
+		}
+		seenHosts.Add(endpoint.Host)
 		if !endpoint.IsLocal {
 			// For a remote endpoints setup a lock RPC client.
-			clnts[index] = newLockRPCClient(authConfig{
+			clnts = append(clnts, newLockRPCClient(authConfig{
 				accessKey:       cred.AccessKey,
 				secretKey:       cred.SecretKey,
 				serverAddr:      endpoint.Host,
 				secureConn:      globalIsSSL,
-				serviceEndpoint: pathutil.Join(minioReservedBucketPath, lockServicePath, endpoint.Path),
+				serviceEndpoint: pathutil.Join(minioReservedBucketPath, lockServicePath),
 				serviceName:     lockServiceName,
-			})
+			}))
 			continue
 		}
 
 		// Local endpoint
-		if myNode == -1 {
-			myNode = index
-		}
+		myNode = len(clnts)
+
 		// For a local endpoint, setup a local lock server to
 		// avoid network requests.
 		localLockServer := lockServer{
 			AuthRPCServer: AuthRPCServer{},
 			ll: localLocker{
-				mutex:           sync.Mutex{},
-				serviceEndpoint: endpoint.Path,
 				serverAddr:      endpoint.Host,
+				serviceEndpoint: pathutil.Join(minioReservedBucketPath, lockServicePath),
 				lockMap:         make(map[string][]lockRequesterInfo),
 			},
 		}
-		globalLockServers = append(globalLockServers, &localLockServer)
-		clnts[index] = &(localLockServer.ll)
+		globalLockServer = &localLockServer
+		clnts = append(clnts, &(localLockServer.ll))
 	}
 
 	return clnts, myNode
 }
 
-// initNSLock - initialize name space lock map.
-func initNSLock(isDistXL bool) {
-	globalNSMutex = &nsLockMap{
+// newNSLock - return a new name space lock map.
+func newNSLock(isDistXL bool) *nsLockMap {
+	nsMutex := nsLockMap{
 		isDistXL: isDistXL,
 		lockMap:  make(map[nsParam]*nsLock),
 		counters: &lockStat{},
@@ -102,7 +110,13 @@ func initNSLock(isDistXL bool) {
 
 	// Initialize nsLockMap with entry for instrumentation information.
 	// Entries of <volume,path> -> stateInfo of locks
-	globalNSMutex.debugLockMap = make(map[nsParam]*debugLockInfoPerVolumePath)
+	nsMutex.debugLockMap = make(map[nsParam]*debugLockInfoPerVolumePath)
+	return &nsMutex
+}
+
+// initNSLock - initialize name space lock map.
+func initNSLock(isDistXL bool) {
+	globalNSMutex = newNSLock(isDistXL)
 }
 
 // nsParam - carries name space resource.
@@ -141,7 +155,7 @@ func (n *nsLockMap) lock(volume, path string, lockSource, opsID string, readLock
 		nsLk = &nsLock{
 			RWLockerSync: func() RWLockerSync {
 				if n.isDistXL {
-					return dsync.NewDRWMutex(pathJoin(volume, path))
+					return dsync.NewDRWMutex(pathJoin(volume, path), globalDsync)
 				}
 				return &lsync.LRWMutex{}
 			}(),
@@ -295,7 +309,7 @@ func (n *nsLockMap) ForceUnlock(volume, path string) {
 	//   are blocking can now proceed as normal and any new locks will also
 	//   participate normally.
 	if n.isDistXL { // For distributed mode, broadcast ForceUnlock message.
-		dsync.NewDRWMutex(pathJoin(volume, path)).ForceUnlock()
+		dsync.NewDRWMutex(pathJoin(volume, path), globalDsync).ForceUnlock()
 	}
 
 	param := nsParam{volume, path}
@@ -359,4 +373,19 @@ func (li *lockInstance) GetRLock(timeout *dynamicTimeout) (timedOutErr error) {
 func (li *lockInstance) RUnlock() {
 	readLock := true
 	li.ns.unlock(li.volume, li.path, li.opsID, readLock)
+}
+
+func getSource() string {
+	var funcName string
+	pc, filename, lineNum, ok := runtime.Caller(2)
+	if ok {
+		filename = pathutil.Base(filename)
+		funcName = strings.TrimPrefix(runtime.FuncForPC(pc).Name(),
+			"github.com/minio/minio/cmd.")
+	} else {
+		filename = "<unknown>"
+		lineNum = 0
+	}
+
+	return fmt.Sprintf("[%s:%d:%s()]", filename, lineNum, funcName)
 }
