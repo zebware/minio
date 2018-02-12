@@ -76,9 +76,6 @@ func handleCommonEnvVars() {
 		globalProfiler = startProfiler(profiler)
 	}
 
-	// Check if object cache is disabled.
-	globalXLObjCacheDisabled = strings.EqualFold(os.Getenv("_MINIO_CACHE"), "off")
-
 	accessKey := os.Getenv("MINIO_ACCESS_KEY")
 	secretKey := os.Getenv("MINIO_SECRET_KEY")
 	if accessKey != "" && secretKey != "" {
@@ -137,13 +134,13 @@ func handleCommonEnvVars() {
 		// Validation is done after parsing both the storage classes. This is needed because we need one
 		// storage class value to deduce the correct value of the other storage class.
 		if globalRRStorageClass.Scheme != "" {
-			err := validateRRSParity(globalRRStorageClass.Parity, globalStandardStorageClass.Parity)
+			err = validateParity(globalStandardStorageClass.Parity, globalRRStorageClass.Parity)
 			fatalIf(err, "Invalid value set in environment variable %s.", reducedRedundancyStorageClassEnv)
 			globalIsStorageClass = true
 		}
 
 		if globalStandardStorageClass.Scheme != "" {
-			err := validateSSParity(globalStandardStorageClass.Parity, globalRRStorageClass.Parity)
+			err = validateParity(globalStandardStorageClass.Parity, globalRRStorageClass.Parity)
 			fatalIf(err, "Invalid value set in environment variable %s.", standardStorageClassEnv)
 			globalIsStorageClass = true
 		}

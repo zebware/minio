@@ -17,10 +17,10 @@
 package cmd
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"time"
 
 	errors2 "github.com/minio/minio/pkg/errors"
@@ -31,6 +31,7 @@ import (
 const (
 	formatBackendFS   = "fs"
 	formatFSVersionV1 = "1"
+	formatFSVersionV2 = "2"
 )
 
 // formatFSV1 - structure holds format version '1'.
@@ -41,6 +42,12 @@ type formatFSV1 struct {
 	} `json:"fs"`
 }
 
+// formatFSV2 - structure is same as formatFSV1. But the multipart backend
+// structure is flat instead of hierarchy now.
+// In .minio.sys/multipart we have:
+// sha256(bucket/object)/uploadID/[fs.json, 1.etag, 2.etag ....]
+type formatFSV2 = formatFSV1
+
 // Used to detect the version of "fs" format.
 type formatFSVersionDetect struct {
 	FS struct {
@@ -48,7 +55,7 @@ type formatFSVersionDetect struct {
 	} `json:"fs"`
 }
 
-// Returns the latest "fs" format.
+// Returns the latest "fs" format V1
 func newFormatFSV1() (format *formatFSV1) {
 	f := &formatFSV1{}
 	f.Version = formatMetaVersionV1
@@ -57,30 +64,20 @@ func newFormatFSV1() (format *formatFSV1) {
 	return f
 }
 
-// Save to fs format.json
-func formatFSSave(f *os.File, data interface{}) error {
-	b, err := json.Marshal(data)
-	if err != nil {
-		return errors2.Trace(err)
-	}
-	if err = f.Truncate(0); err != nil {
-		return errors2.Trace(err)
-	}
-	if _, err = f.Seek(0, io.SeekStart); err != nil {
-		return err
-	}
-	_, err = f.Write(b)
-	if err != nil {
-		return errors2.Trace(err)
-	}
-	return nil
+// Returns the latest "fs" format V2
+func newFormatFSV2() (format *formatFSV2) {
+	f := &formatFSV2{}
+	f.Version = formatMetaVersionV1
+	f.Format = formatBackendFS
+	f.FS.Version = formatFSVersionV2
+	return f
 }
 
 // Returns the field formatMetaV1.Format i.e the string "fs" which is never likely to change.
 // We do not use this function in XL to get the format as the file is not fcntl-locked on XL.
 func formatMetaGetFormatBackendFS(r io.ReadSeeker) (string, error) {
 	format := &formatMetaV1{}
-	if err := jsonLoadFromSeeker(r, format); err != nil {
+	if err := jsonLoad(r, format); err != nil {
 		return "", err
 	}
 	if format.Version == formatMetaVersionV1 {
@@ -92,26 +89,63 @@ func formatMetaGetFormatBackendFS(r io.ReadSeeker) (string, error) {
 // Returns formatFS.FS.Version
 func formatFSGetVersion(r io.ReadSeeker) (string, error) {
 	format := &formatFSVersionDetect{}
-	if err := jsonLoadFromSeeker(r, format); err != nil {
+	if err := jsonLoad(r, format); err != nil {
 		return "", err
 	}
 	return format.FS.Version, nil
+}
+
+// Migrate from V1 to V2. V2 implements new backend format for multipart
+// uploads. Delete the previous multipart directory.
+func formatFSMigrateV1ToV2(wlk *lock.LockedFile, fsPath string) error {
+	version, err := formatFSGetVersion(wlk)
+	if err != nil {
+		return err
+	}
+
+	if version != formatFSVersionV1 {
+		return fmt.Errorf(`format.json version expected %s, found %s`, formatFSVersionV1, version)
+	}
+
+	if err = fsRemoveAll(path.Join(fsPath, minioMetaMultipartBucket)); err != nil {
+		return err
+	}
+
+	if err = os.MkdirAll(path.Join(fsPath, minioMetaMultipartBucket), 0755); err != nil {
+		return err
+	}
+
+	return jsonSave(wlk.File, newFormatFSV2())
 }
 
 // Migrate the "fs" backend.
 // Migration should happen when formatFSV1.FS.Version changes. This version
 // can change when there is a change to the struct formatFSV1.FS or if there
 // is any change in the backend file system tree structure.
-func formatFSMigrate(wlk *lock.LockedFile) error {
+func formatFSMigrate(wlk *lock.LockedFile, fsPath string) error {
 	// Add any migration code here in case we bump format.FS.Version
-
-	// Make sure that the version is what we expect after the migration.
 	version, err := formatFSGetVersion(wlk)
 	if err != nil {
 		return err
 	}
-	if version != formatFSVersionV1 {
-		return fmt.Errorf(`%s file: expected FS version: %s, found FS version: %s`, formatConfigFile, formatFSVersionV1, version)
+
+	switch version {
+	case formatFSVersionV1:
+		if err = formatFSMigrateV1ToV2(wlk, fsPath); err != nil {
+			return err
+		}
+		fallthrough
+	case formatFSVersionV2:
+		// We are at the latest version.
+	}
+
+	// Make sure that the version is what we expect after the migration.
+	version, err = formatFSGetVersion(wlk)
+	if err != nil {
+		return err
+	}
+	if version != formatFSVersionV2 {
+		return fmt.Errorf(`%s file: expected FS version: %s, found FS version: %s`, formatConfigFile, formatFSVersionV2, version)
 	}
 	return nil
 }
@@ -136,7 +170,7 @@ func createFormatFS(fsFormatPath string) error {
 		return nil
 	}
 
-	return formatFSSave(lk.File, newFormatFSV1())
+	return jsonSave(lk.File, newFormatFSV1())
 }
 
 // This function returns a read-locked format.json reference to the caller.
@@ -196,7 +230,7 @@ func initFormatFS(fsPath string) (rlk *lock.RLockedFile, err error) {
 		if err != nil {
 			return nil, err
 		}
-		if version != formatFSVersionV1 {
+		if version != formatFSVersionV2 {
 			// Format needs migration
 			rlk.Close()
 			// Hold write lock during migration so that we do not disturb any
@@ -211,7 +245,7 @@ func initFormatFS(fsPath string) (rlk *lock.RLockedFile, err error) {
 			if err != nil {
 				return nil, err
 			}
-			err = formatFSMigrate(wlk)
+			err = formatFSMigrate(wlk, fsPath)
 			wlk.Close()
 			if err != nil {
 				// Migration failed, bail out so that the user can observe what happened.

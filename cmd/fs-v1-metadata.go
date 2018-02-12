@@ -17,12 +17,10 @@
 package cmd
 
 import (
-	"encoding/json"
 	"io"
 	"io/ioutil"
 	"os"
 	pathutil "path"
-	"sort"
 	"strings"
 
 	"github.com/minio/minio/pkg/errors"
@@ -127,58 +125,15 @@ func (m fsMetaV1) ToObjectInfo(bucket, object string, fi os.FileInfo) ObjectInfo
 	return objInfo
 }
 
-// ObjectPartIndex - returns the index of matching object part number.
-func (m fsMetaV1) ObjectPartIndex(partNumber int) (partIndex int) {
-	for i, part := range m.Parts {
-		if partNumber == part.Number {
-			partIndex = i
-			return partIndex
-		}
-	}
-	return -1
-}
-
-// AddObjectPart - add a new object part in order.
-func (m *fsMetaV1) AddObjectPart(partNumber int, partName string, partETag string, partSize int64) {
-	partInfo := objectPartInfo{
-		Number: partNumber,
-		Name:   partName,
-		ETag:   partETag,
-		Size:   partSize,
-	}
-
-	// Update part info if it already exists.
-	for i, part := range m.Parts {
-		if partNumber == part.Number {
-			m.Parts[i] = partInfo
-			return
-		}
-	}
-
-	// Proceed to include new part info.
-	m.Parts = append(m.Parts, partInfo)
-
-	// Parts in fsMeta should be in sorted order by part number.
-	sort.Sort(byObjectPartNumber(m.Parts))
-}
-
 func (m *fsMetaV1) WriteTo(lk *lock.LockedFile) (n int64, err error) {
-	var metadataBytes []byte
-	metadataBytes, err = json.Marshal(m)
+	if err = jsonSave(lk, m); err != nil {
+		return 0, err
+	}
+	fi, err := lk.Stat()
 	if err != nil {
-		return 0, errors.Trace(err)
+		return 0, err
 	}
-
-	if err = lk.Truncate(0); err != nil {
-		return 0, errors.Trace(err)
-	}
-
-	if _, err = lk.Write(metadataBytes); err != nil {
-		return 0, errors.Trace(err)
-	}
-
-	// Success.
-	return int64(len(metadataBytes)), nil
+	return fi.Size(), nil
 }
 
 func parseFSVersion(fsMetaBuf []byte) string {
@@ -201,21 +156,6 @@ func parseFSMetaMap(fsMetaBuf []byte) map[string]string {
 		metaMap[key] = valResult.String()
 	}
 	return metaMap
-}
-
-func parseFSParts(fsMetaBuf []byte) []objectPartInfo {
-	// Parse the FS Parts.
-	partsResult := gjson.GetBytes(fsMetaBuf, "parts").Array()
-	partInfo := make([]objectPartInfo, len(partsResult))
-	for i, p := range partsResult {
-		info := objectPartInfo{}
-		info.Number = int(p.Get("number").Int())
-		info.Name = p.Get("name").String()
-		info.ETag = p.Get("etag").String()
-		info.Size = p.Get("size").Int()
-		partInfo[i] = info
-	}
-	return partInfo
 }
 
 func (m *fsMetaV1) ReadFrom(lk *lock.LockedFile) (n int64, err error) {
@@ -249,9 +189,6 @@ func (m *fsMetaV1) ReadFrom(lk *lock.LockedFile) (n int64, err error) {
 	// obtain metadata.
 	m.Meta = parseFSMetaMap(fsMetaBuf)
 
-	// obtain parts info list.
-	m.Parts = parseFSParts(fsMetaBuf)
-
 	// obtain minio release date.
 	m.Minio.Release = parseFSRelease(fsMetaBuf)
 
@@ -266,20 +203,4 @@ func newFSMetaV1() (fsMeta fsMetaV1) {
 	fsMeta.Format = fsMetaFormat
 	fsMeta.Minio.Release = ReleaseTag
 	return fsMeta
-}
-
-// Return if the part info in uploadedParts and CompleteParts are same.
-func isPartsSame(uploadedParts []objectPartInfo, CompleteParts []CompletePart) bool {
-	if len(uploadedParts) != len(CompleteParts) {
-		return false
-	}
-
-	for i := range CompleteParts {
-		if uploadedParts[i].Number != CompleteParts[i].PartNumber ||
-			uploadedParts[i].ETag != CompleteParts[i].ETag {
-			return false
-		}
-	}
-
-	return true
 }

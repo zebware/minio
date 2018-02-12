@@ -23,6 +23,7 @@ import (
 	"runtime"
 
 	"github.com/minio/minio/pkg/errors"
+	"github.com/minio/minio/pkg/lock"
 )
 
 // Removes only the file at given path does not remove
@@ -266,7 +267,7 @@ func fsCreateFile(filePath string, reader io.Reader, buf []byte, fallocSize int6
 		return 0, errors.Trace(err)
 	}
 
-	writer, err := os.OpenFile((filePath), os.O_CREATE|os.O_WRONLY, 0666)
+	writer, err := lock.Open(filePath, os.O_CREATE|os.O_WRONLY, 0666)
 	if err != nil {
 		return 0, osErrToFSFileErr(err)
 	}
@@ -291,37 +292,8 @@ func fsCreateFile(filePath string, reader io.Reader, buf []byte, fallocSize int6
 			return 0, errors.Trace(err)
 		}
 	}
+
 	return bytesWritten, nil
-}
-
-// Removes uploadID at destination path.
-func fsRemoveUploadIDPath(basePath, uploadIDPath string) error {
-	if basePath == "" || uploadIDPath == "" {
-		return errors.Trace(errInvalidArgument)
-	}
-	if err := checkPathLength(basePath); err != nil {
-		return errors.Trace(err)
-	}
-	if err := checkPathLength(uploadIDPath); err != nil {
-		return errors.Trace(err)
-	}
-
-	// List all the entries in uploadID.
-	entries, err := readDir(uploadIDPath)
-	if err != nil && err != errFileNotFound {
-		return errors.Trace(err)
-	}
-
-	// Delete all the entries obtained from previous readdir.
-	for _, entryPath := range entries {
-		err = fsDeleteFile(basePath, pathJoin(uploadIDPath, entryPath))
-		if err != nil && err != errFileNotFound {
-			return errors.Trace(err)
-		}
-	}
-
-	fsRemoveDir(uploadIDPath)
-	return nil
 }
 
 // fsFAllocate is similar to Fallocate but provides a convenient

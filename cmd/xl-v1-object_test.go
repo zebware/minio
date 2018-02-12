@@ -75,8 +75,6 @@ func TestXLDeleteObjectBasic(t *testing.T) {
 		{"----", "obj", BucketNameInvalid{Bucket: "----"}},
 		{"bucket", "", ObjectNameInvalid{Bucket: "bucket", Object: ""}},
 		{"bucket", "doesnotexist", ObjectNotFound{Bucket: "bucket", Object: "doesnotexist"}},
-		{"bucket", "obj/", ObjectNotFound{Bucket: "bucket", Object: "obj/"}},
-		{"bucket", "/obj", ObjectNotFound{Bucket: "bucket", Object: "/obj"}},
 		{"bucket", "obj", nil},
 	}
 
@@ -186,8 +184,7 @@ func TestGetObjectNoQuorum(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Disable caching to avoid returning early and not covering other code-paths
-	xl.objCacheEnabled = false
+
 	// Make 9 disks offline, which leaves less than quorum number of disks
 	// in a 16 disk XL setup. The original disks are 'replaced' with
 	// naughtyDisks that fail after 'f' successful StorageAPI method

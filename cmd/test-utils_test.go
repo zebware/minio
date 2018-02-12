@@ -1657,12 +1657,6 @@ func initObjectLayer(endpoints EndpointList) (ObjectLayer, []StorageAPI, error) 
 		return nil, nil, err
 	}
 
-	// Disabling the cache for integration tests.
-	// Should use the object layer tests for validating cache.
-	if xl, ok := objLayer.(*xlObjects); ok {
-		xl.objCacheEnabled = false
-	}
-
 	// Success.
 	return objLayer, formattedDisks, nil
 }
@@ -1783,7 +1777,7 @@ func prepareTestBackend(instanceType string) (ObjectLayer, []string, error) {
 //   STEP 1: Call the handler with the unsigned HTTP request (anonReq), assert for the `ErrAccessDenied` error response.
 //   STEP 2: Set the policy to allow the unsigned request, use the policyFunc to obtain the relevant statement and call
 //           the handler again to verify its success.
-func ExecObjectLayerAPIAnonTest(t *testing.T, testName, bucketName, objectName, instanceType string, apiRouter http.Handler,
+func ExecObjectLayerAPIAnonTest(t *testing.T, obj ObjectLayer, testName, bucketName, objectName, instanceType string, apiRouter http.Handler,
 	anonReq *http.Request, policyFunc func(string, string) policy.Statement) {
 
 	anonTestStr := "Anonymous HTTP request test"
@@ -1841,8 +1835,7 @@ func ExecObjectLayerAPIAnonTest(t *testing.T, testName, bucketName, objectName, 
 		Version:    "1.0",
 		Statements: []policy.Statement{policyFunc(bucketName, "")},
 	}
-
-	globalBucketPolicies.SetBucketPolicy(bucketName, policyChange{false, bp})
+	obj.SetBucketPolicy(bucketName, bp)
 	// now call the handler again with the unsigned/anonymous request, it should be accepted.
 	rec = httptest.NewRecorder()
 
@@ -1894,6 +1887,7 @@ func ExecObjectLayerAPIAnonTest(t *testing.T, testName, bucketName, objectName, 
 	if rec.Code != accesDeniedHTTPStatus {
 		t.Fatal(failTestStr(unknownSignTestStr, fmt.Sprintf("Object API Unknow auth test for \"%s\", expected to fail with %d, but failed with %d", testName, accesDeniedHTTPStatus, rec.Code)))
 	}
+
 }
 
 // ExecObjectLayerAPINilTest - Sets the object layer to `nil`, and calls rhe registered object layer API endpoint,

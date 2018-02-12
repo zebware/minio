@@ -1,5 +1,7 @@
+// +build !windows
+
 /*
- * Minio Cloud Storage, (C) 2017 Minio, Inc.
+ * Minio Cloud Storage, (C) 2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -14,23 +16,28 @@
  * limitations under the License.
  */
 
-package cmd
+package ioutil
 
 import (
-	"github.com/minio/minio/pkg/auth"
+	"io"
+	"os"
 )
 
-// GatewayMinioSysTmp prefix is used in Azure/GCS gateway for save metadata sent by Initialize Multipart Upload API.
-const GatewayMinioSysTmp = "minio.sys.tmp/"
+// AppendFile - appends the file "src" to the file "dst"
+func AppendFile(dst string, src string) error {
+	appendFile, err := os.OpenFile(dst, os.O_WRONLY|os.O_APPEND|os.O_CREATE, 0644)
+	if err != nil {
+		return err
+	}
+	defer appendFile.Close()
 
-// Gateway represents a gateway backend.
-type Gateway interface {
-	// Name returns the unique name of the gateway.
-	Name() string
-
-	// NewGatewayLayer returns a new  ObjectLayer.
-	NewGatewayLayer(creds auth.Credentials) (ObjectLayer, error)
-
-	// Returns true if gateway is ready for production.
-	Production() bool
+	srcFile, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer srcFile.Close()
+	// Allocate staging buffer.
+	var buf = make([]byte, defaultAppendBufferSize)
+	_, err = io.CopyBuffer(appendFile, srcFile, buf)
+	return err
 }

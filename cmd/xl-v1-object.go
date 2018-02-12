@@ -27,11 +27,33 @@ import (
 	"github.com/minio/minio/pkg/errors"
 	"github.com/minio/minio/pkg/hash"
 	"github.com/minio/minio/pkg/mimedb"
-	"github.com/minio/minio/pkg/objcache"
 )
 
 // list all errors which can be ignored in object operations.
 var objectOpIgnoredErrs = append(baseIgnoredErrs, errDiskAccessDenied)
+
+// putObjectDir hints the bottom layer to create a new directory.
+func (xl xlObjects) putObjectDir(bucket, object string, writeQuorum int) error {
+	var wg = &sync.WaitGroup{}
+
+	errs := make([]error, len(xl.storageDisks))
+	// Prepare object creation in all disks
+	for index, disk := range xl.storageDisks {
+		if disk == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(index int, disk StorageAPI) {
+			defer wg.Done()
+			if err := disk.MakeVol(pathJoin(bucket, object)); err != nil && err != errVolumeExists {
+				errs[index] = err
+			}
+		}(index, disk)
+	}
+	wg.Wait()
+
+	return reduceWriteQuorumErrs(errs, objectOpIgnoredErrs, writeQuorum)
+}
 
 // prepareFile hints the bottom layer to optimize the creation of a new object
 func (xl xlObjects) prepareFile(bucket, object string, size int64, onlineDisks []StorageAPI, blockSize int64, dataBlocks, writeQuorum int) error {
@@ -204,6 +226,12 @@ func (xl xlObjects) getObject(bucket, object string, startOffset int64, length i
 		return errors.Trace(errUnexpected)
 	}
 
+	// If its a directory request, we return an empty body.
+	if hasSuffix(object, slashSeparator) {
+		_, err := writer.Write([]byte(""))
+		return toObjectErr(errors.Trace(err), bucket, object)
+	}
+
 	// Read metadata associated with the object from all disks.
 	metaArr, errs := readAllXLMetadata(xl.storageDisks, bucket, object)
 
@@ -260,52 +288,6 @@ func (xl xlObjects) getObject(bucket, object string, startOffset int64, length i
 		return errors.Trace(InvalidRange{startOffset, length, xlMeta.Stat.Size})
 	}
 
-	// Save the writer.
-	mw := writer
-
-	// Object cache enabled block.
-	if xlMeta.Stat.Size > 0 && xl.objCacheEnabled {
-		// Validate if we have previous cache.
-		var cachedBuffer io.ReaderAt
-		cachedBuffer, err = xl.objCache.Open(path.Join(bucket, object), modTime)
-		if err == nil { // Cache hit
-			// Create a new section reader, starting at an offset with length.
-			reader := io.NewSectionReader(cachedBuffer, startOffset, length)
-
-			// Copy the data out.
-			if _, err = io.Copy(writer, reader); err != nil {
-				return errors.Trace(err)
-			}
-
-			// Success.
-			return nil
-
-		} // Cache miss.
-
-		// For unknown error, return and error out.
-		if err != objcache.ErrKeyNotFoundInCache {
-			return errors.Trace(err)
-		} // Cache has not been found, fill the cache.
-
-		// Cache is only set if whole object is being read.
-		if startOffset == 0 && length == xlMeta.Stat.Size {
-			// Proceed to set the cache.
-			var newBuffer io.WriteCloser
-			// Create a new entry in memory of length.
-			newBuffer, err = xl.objCache.Create(path.Join(bucket, object), length)
-			if err == nil {
-				// Create a multi writer to write to both memory and client response.
-				mw = io.MultiWriter(newBuffer, writer)
-				defer newBuffer.Close()
-			}
-			// Ignore error if cache is full, proceed to write the object.
-			if err != nil && err != objcache.ErrCacheFull {
-				// For any other error return here.
-				return toObjectErr(errors.Trace(err), bucket, object)
-			}
-		}
-	}
-
 	var totalBytesRead int64
 	storage, err := NewErasureStorage(onlineDisks, xlMeta.Erasure.DataBlocks, xlMeta.Erasure.ParityBlocks, xlMeta.Erasure.BlockSize)
 	if err != nil {
@@ -337,7 +319,7 @@ func (xl xlObjects) getObject(bucket, object string, startOffset int64, length i
 			checksums[index] = checksumInfo.Hash
 		}
 
-		file, err := storage.ReadFile(mw, bucket, pathJoin(object, partName), partOffset, readSize, partSize, checksums, algorithm, xlMeta.Erasure.BlockSize)
+		file, err := storage.ReadFile(writer, bucket, pathJoin(object, partName), partOffset, readSize, partSize, checksums, algorithm, xlMeta.Erasure.BlockSize)
 		if err != nil {
 			return toObjectErr(err, bucket, object)
 		}
@@ -354,6 +336,42 @@ func (xl xlObjects) getObject(bucket, object string, startOffset int64, length i
 	return nil
 }
 
+// getObjectInfoDir - This getObjectInfo is specific to object directory lookup.
+func (xl xlObjects) getObjectInfoDir(bucket, object string) (oi ObjectInfo, err error) {
+	var wg = &sync.WaitGroup{}
+
+	errs := make([]error, len(xl.storageDisks))
+	// Prepare object creation in a all disks
+	for index, disk := range xl.storageDisks {
+		if disk == nil {
+			continue
+		}
+		wg.Add(1)
+		go func(index int, disk StorageAPI) {
+			defer wg.Done()
+			if _, err := disk.StatVol(pathJoin(bucket, object)); err != nil {
+				// Since we are re-purposing StatVol, an object which
+				// is a directory if it doesn't exist should be
+				// returned as errFileNotFound instead, convert
+				// the error right here accordingly.
+				if err == errVolumeNotFound {
+					err = errFileNotFound
+				} else if err == errVolumeAccessDenied {
+					err = errFileAccessDenied
+				}
+
+				// Save error to reduce it later
+				errs[index] = err
+			}
+		}(index, disk)
+	}
+
+	wg.Wait()
+
+	readQuorum := len(xl.storageDisks) / 2
+	return dirObjectInfo(bucket, object, 0, map[string]string{}), reduceReadQuorumErrs(errs, objectOpIgnoredErrs, readQuorum)
+}
+
 // GetObjectInfo - reads object metadata and replies back ObjectInfo.
 func (xl xlObjects) GetObjectInfo(bucket, object string) (oi ObjectInfo, e error) {
 	// Lock the object before reading.
@@ -367,38 +385,65 @@ func (xl xlObjects) GetObjectInfo(bucket, object string) (oi ObjectInfo, e error
 		return oi, err
 	}
 
+	if hasSuffix(object, slashSeparator) {
+		if oi, e = xl.getObjectInfoDir(bucket, object); e != nil {
+			return oi, toObjectErr(e, bucket, object)
+		}
+		return oi, nil
+	}
+
 	info, err := xl.getObjectInfo(bucket, object)
 	if err != nil {
 		return oi, toObjectErr(err, bucket, object)
 	}
+
 	return info, nil
 }
 
 // getObjectInfo - wrapper for reading object metadata and constructs ObjectInfo.
 func (xl xlObjects) getObjectInfo(bucket, object string) (objInfo ObjectInfo, err error) {
-	// Extracts xlStat and xlMetaMap.
-	xlStat, xlMetaMap, err := xl.readXLMetaStat(bucket, object)
+	// Read metadata associated with the object from all disks.
+	metaArr, errs := readAllXLMetadata(xl.storageDisks, bucket, object)
+
+	// get Quorum for this object
+	readQuorum, _, err := objectQuorumFromMeta(xl, metaArr, errs)
 	if err != nil {
-		return ObjectInfo{}, err
+		return objInfo, toObjectErr(err, bucket, object)
+	}
+
+	if reducedErr := reduceReadQuorumErrs(errs, objectOpIgnoredErrs, readQuorum); reducedErr != nil {
+		return objInfo, toObjectErr(reducedErr, bucket, object)
+	}
+
+	// List all the file commit ids from parts metadata.
+	modTimes := listObjectModtimes(metaArr, errs)
+
+	// Reduce list of UUIDs to a single common value.
+	modTime, _ := commonTime(modTimes)
+
+	// Pick latest valid metadata.
+	xlMeta, err := pickValidXLMeta(metaArr, modTime)
+	if err != nil {
+		return objInfo, err
 	}
 
 	objInfo = ObjectInfo{
 		IsDir:           false,
 		Bucket:          bucket,
 		Name:            object,
-		Size:            xlStat.Size,
-		ModTime:         xlStat.ModTime,
-		ContentType:     xlMetaMap["content-type"],
-		ContentEncoding: xlMetaMap["content-encoding"],
+		Size:            xlMeta.Stat.Size,
+		ModTime:         xlMeta.Stat.ModTime,
+		ContentType:     xlMeta.Meta["content-type"],
+		ContentEncoding: xlMeta.Meta["content-encoding"],
 	}
 
 	// Extract etag.
-	objInfo.ETag = extractETag(xlMetaMap)
+	objInfo.ETag = extractETag(xlMeta.Meta)
 
 	// etag/md5Sum has already been extracted. We need to
 	// remove to avoid it from appearing as part of
 	// response headers. e.g, X-Minio-* or X-Amz-*.
-	objInfo.UserDefined = cleanMetadata(xlMetaMap)
+	objInfo.UserDefined = cleanMetadata(xlMeta.Meta)
 
 	// Success.
 	return objInfo, nil
@@ -497,6 +542,10 @@ func renameObject(disks []StorageAPI, srcBucket, srcObject, dstBucket, dstObject
 // writes `xl.json` which carries the necessary metadata for future
 // object operations.
 func (xl xlObjects) PutObject(bucket string, object string, data *hash.Reader, metadata map[string]string) (objInfo ObjectInfo, err error) {
+	// Validate put object input args.
+	if err = checkPutObjectArgs(bucket, object, xl, data.Size()); err != nil {
+		return ObjectInfo{}, err
+	}
 	// Lock the object.
 	objectLock := xl.nsMutex.NewNSLock(bucket, object)
 	if err := objectLock.GetLock(globalObjectTimeout); err != nil {
@@ -508,6 +557,26 @@ func (xl xlObjects) PutObject(bucket string, object string, data *hash.Reader, m
 
 // putObject wrapper for xl PutObject
 func (xl xlObjects) putObject(bucket string, object string, data *hash.Reader, metadata map[string]string) (objInfo ObjectInfo, err error) {
+	uniqueID := mustGetUUID()
+	tempObj := uniqueID
+
+	// No metadata is set, allocate a new one.
+	if metadata == nil {
+		metadata = make(map[string]string)
+	}
+
+	// Get parity and data drive count based on storage class metadata
+	dataDrives, parityDrives := getRedundancyCount(metadata[amzStorageClass], len(xl.storageDisks))
+
+	// we now know the number of blocks this object needs for data and parity.
+	// writeQuorum is dataBlocks + 1
+	writeQuorum := dataDrives + 1
+
+	// Delete temporary object in the event of failure.
+	// If PutObject succeeded there would be no temporary
+	// object to delete.
+	defer xl.deleteObject(minioMetaTmpBucket, tempObj)
+
 	// This is a special case with size as '0' and object ends with
 	// a slash separator, we treat it like a valid operation and
 	// return success.
@@ -518,11 +587,21 @@ func (xl xlObjects) putObject(bucket string, object string, data *hash.Reader, m
 		if xl.parentDirIsObject(bucket, path.Dir(object)) {
 			return ObjectInfo{}, toObjectErr(errors.Trace(errFileAccessDenied), bucket, object)
 		}
+
+		if err = xl.putObjectDir(minioMetaTmpBucket, tempObj, writeQuorum); err != nil {
+			return ObjectInfo{}, toObjectErr(errors.Trace(err), bucket, object)
+		}
+
+		// Rename the successfully written temporary object to final location.
+		if _, err = renameObject(xl.storageDisks, minioMetaTmpBucket, tempObj, bucket, object, writeQuorum); err != nil {
+			return ObjectInfo{}, toObjectErr(err, bucket, object)
+		}
+
 		return dirObjectInfo(bucket, object, data.Size(), metadata), nil
 	}
 
 	// Validate put object input args.
-	if err = checkPutObjectArgs(bucket, object, xl); err != nil {
+	if err = checkPutObjectArgs(bucket, object, xl, data.Size()); err != nil {
 		return ObjectInfo{}, err
 	}
 
@@ -538,43 +617,8 @@ func (xl xlObjects) putObject(bucket string, object string, data *hash.Reader, m
 		return ObjectInfo{}, toObjectErr(errors.Trace(errFileAccessDenied), bucket, object)
 	}
 
-	// No metadata is set, allocate a new one.
-	if metadata == nil {
-		metadata = make(map[string]string)
-	}
-
-	uniqueID := mustGetUUID()
-	tempObj := uniqueID
-
 	// Limit the reader to its provided size if specified.
 	var reader io.Reader = data
-
-	// Proceed to set the cache.
-	var newBuffer io.WriteCloser
-
-	// If caching is enabled, proceed to set the cache.
-	if data.Size() > 0 && xl.objCacheEnabled {
-		// PutObject invalidates any previously cached object in memory.
-		xl.objCache.Delete(path.Join(bucket, object))
-
-		// Create a new entry in memory of size.
-		newBuffer, err = xl.objCache.Create(path.Join(bucket, object), data.Size())
-		if err == nil {
-			// Cache incoming data into a buffer
-			reader = io.TeeReader(data, newBuffer)
-		} else {
-			// Return errors other than ErrCacheFull
-			if err != objcache.ErrCacheFull {
-				return ObjectInfo{}, toObjectErr(errors.Trace(err), bucket, object)
-			}
-		}
-	}
-	// Get parity and data drive count based on storage class metadata
-	dataDrives, parityDrives := getRedundancyCount(metadata[amzStorageClass], len(xl.storageDisks))
-
-	// we now know the number of blocks this object needs for data and parity.
-	// writeQuorum is dataBlocks + 1
-	writeQuorum := dataDrives + 1
 
 	// Initialize parts metadata
 	partsMetadata := make([]xlMetaV1, len(xl.storageDisks))
@@ -588,11 +632,6 @@ func (xl xlObjects) putObject(bucket string, object string, data *hash.Reader, m
 
 	// Order disks according to erasure distribution
 	onlineDisks := shuffleDisks(xl.storageDisks, partsMetadata[0].Erasure.Distribution)
-
-	// Delete temporary object in the event of failure.
-	// If PutObject succeeded there would be no temporary
-	// object to delete.
-	defer xl.deleteObject(minioMetaTmpBucket, tempObj)
 
 	// Total size of the written object
 	var sizeWritten int64
@@ -708,12 +747,6 @@ func (xl xlObjects) putObject(bucket string, object string, data *hash.Reader, m
 		return ObjectInfo{}, toObjectErr(err, bucket, object)
 	}
 
-	// Once we have successfully renamed the object, Close the buffer which would
-	// save the object on cache.
-	if sizeWritten > 0 && xl.objCacheEnabled && newBuffer != nil {
-		newBuffer.Close()
-	}
-
 	// Object info is the same in all disks, so we can pick the first meta
 	// of the first disk
 	xlMeta = partsMetadata[0]
@@ -741,13 +774,20 @@ func (xl xlObjects) deleteObject(bucket, object string) error {
 	// Initialize sync waitgroup.
 	var wg = &sync.WaitGroup{}
 
-	// Read metadata associated with the object from all disks.
-	metaArr, errs := readAllXLMetadata(xl.storageDisks, bucket, object)
+	var writeQuorum int
+	var err error
+	// If its a directory request, no need to read metadata.
+	if !hasSuffix(object, slashSeparator) {
+		// Read metadata associated with the object from all disks.
+		metaArr, errs := readAllXLMetadata(xl.storageDisks, bucket, object)
 
-	// get Quorum for this object
-	_, writeQuorum, err := objectQuorumFromMeta(xl, metaArr, errs)
-	if err != nil {
-		return err
+		// get Quorum for this object
+		_, writeQuorum, err = objectQuorumFromMeta(xl, metaArr, errs)
+		if err != nil {
+			return err
+		}
+	} else {
+		writeQuorum = len(xl.storageDisks)/2 + 1
 	}
 
 	// Initialize list of errors.
@@ -789,22 +829,40 @@ func (xl xlObjects) DeleteObject(bucket, object string) (err error) {
 		return err
 	}
 
+	if hasSuffix(object, slashSeparator) {
+		// Delete the object on all disks.
+		if err = xl.deleteObject(bucket, object); err != nil {
+			return toObjectErr(err, bucket, object)
+		}
+	}
+
 	// Validate object exists.
 	if !xl.isObject(bucket, object) {
 		return errors.Trace(ObjectNotFound{bucket, object})
 	} // else proceed to delete the object.
 
 	// Delete the object on all disks.
-	err = xl.deleteObject(bucket, object)
-	if err != nil {
+	if err = xl.deleteObject(bucket, object); err != nil {
 		return toObjectErr(err, bucket, object)
-	}
-
-	if xl.objCacheEnabled {
-		// Delete from the cache.
-		xl.objCache.Delete(pathJoin(bucket, object))
 	}
 
 	// Success.
 	return nil
+}
+
+// ListObjectsV2 lists all blobs in bucket filtered by prefix
+func (xl xlObjects) ListObjectsV2(bucket, prefix, continuationToken, delimiter string, maxKeys int, fetchOwner bool, startAfter string) (result ListObjectsV2Info, err error) {
+	loi, err := xl.ListObjects(bucket, prefix, continuationToken, delimiter, maxKeys)
+	if err != nil {
+		return result, err
+	}
+
+	listObjectsV2Info := ListObjectsV2Info{
+		IsTruncated:           loi.IsTruncated,
+		ContinuationToken:     continuationToken,
+		NextContinuationToken: loi.NextMarker,
+		Objects:               loi.Objects,
+		Prefixes:              loi.Prefixes,
+	}
+	return listObjectsV2Info, err
 }
