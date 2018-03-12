@@ -412,7 +412,7 @@ func (api objectAPIHandlers) PutBucketHandler(w http.ResponseWriter, r *http.Req
 	defer bucketLock.Unlock()
 
 	// Proceed to creating a bucket.
-	err := objectAPI.MakeBucketWithLocation(bucket, "")
+	err := objectAPI.MakeBucketWithLocation(bucket, location)
 	if err != nil {
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return
@@ -566,14 +566,36 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 		return
 	}
 
+	if objectAPI.IsEncryptionSupported() {
+		if hasSSECustomerHeader(formValues) && !hasSuffix(object, slashSeparator) { // handle SSE-C requests
+			var reader io.Reader
+			var key []byte
+			key, err = ParseSSECustomerHeader(formValues)
+			if err != nil {
+				writeErrorResponse(w, toAPIErrorCode(err), r.URL)
+				return
+			}
+			reader, err = newEncryptReader(hashReader, key, metadata)
+			if err != nil {
+				writeErrorResponse(w, toAPIErrorCode(err), r.URL)
+				return
+			}
+			info := ObjectInfo{Size: fileSize}
+			hashReader, err = hash.NewReader(reader, info.EncryptedSize(), "", "") // do not try to verify encrypted content
+			if err != nil {
+				writeErrorResponse(w, toAPIErrorCode(err), r.URL)
+				return
+			}
+		}
+	}
+
 	objInfo, err := objectAPI.PutObject(bucket, object, hashReader, metadata)
 	if err != nil {
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return
 	}
 
-	port := r.Header.Get("X-Forward-Proto")
-	location := getObjectLocation(r.Host, port, bucket, object)
+	location := getObjectLocation(r, globalDomainName, bucket, object)
 	w.Header().Set("ETag", `"`+objInfo.ETag+`"`)
 	w.Header().Set("Location", location)
 

@@ -398,7 +398,12 @@ func (fs *FSObjects) CopyObject(srcBucket, srcObject, dstBucket, dstObject strin
 
 		// Save objects' metadata in `fs.json`.
 		fsMeta := newFSMetaV1()
+		if _, err = fsMeta.ReadFrom(wlk); err != nil {
+			return oi, toObjectErr(err, srcBucket, srcObject)
+		}
+
 		fsMeta.Meta = srcInfo.UserDefined
+		fsMeta.Meta["etag"] = srcInfo.ETag
 		if _, err = fsMeta.WriteTo(wlk); err != nil {
 			return oi, toObjectErr(err, srcBucket, srcObject)
 		}
@@ -497,6 +502,7 @@ func (fs *FSObjects) getObject(bucket, object string, offset int64, length int64
 			return toObjectErr(errors.Trace(InvalidETag{}), bucket, object)
 		}
 	}
+
 	// Read the object, doesn't exist returns an s3 compatible error.
 	fsObjPath := pathJoin(fs.fsPath, bucket, object)
 	reader, size, err := fsOpenFile(fsObjPath, offset)
@@ -918,48 +924,8 @@ func (fs *FSObjects) ListObjects(bucket, prefix, marker, delimiter string, maxKe
 		if err = objectLock.GetRLock(globalListingTimeout); err != nil {
 			return ObjectInfo{}, err
 		}
-
-		if hasSuffix(entry, slashSeparator) {
-			var fi os.FileInfo
-			fi, err = fsStatDir(pathJoin(fs.fsPath, bucket, entry))
-			objectLock.RUnlock()
-			if err != nil {
-				return objInfo, err
-			}
-			// Success.
-			return ObjectInfo{
-				// Object name needs to be full path.
-				Name:    entry,
-				Bucket:  bucket,
-				Size:    fi.Size(),
-				ModTime: fi.ModTime(),
-				IsDir:   fi.IsDir(),
-			}, nil
-		}
-
-		var etag string
-		etag, err = fs.getObjectETag(bucket, entry)
-		objectLock.RUnlock()
-		if err != nil {
-			return ObjectInfo{}, err
-		}
-
-		// Stat the file to get file size.
-		var fi os.FileInfo
-		fi, err = fsStatFile(pathJoin(fs.fsPath, bucket, entry))
-		if err != nil {
-			return ObjectInfo{}, toObjectErr(err, bucket, entry)
-		}
-
-		// Success.
-		return ObjectInfo{
-			Name:    entry,
-			Bucket:  bucket,
-			Size:    fi.Size(),
-			ModTime: fi.ModTime(),
-			IsDir:   fi.IsDir(),
-			ETag:    etag,
-		}, nil
+		defer objectLock.RUnlock()
+		return fs.getObjectInfo(bucket, entry)
 	}
 
 	heal := false // true only for xl.ListObjectsHeal()

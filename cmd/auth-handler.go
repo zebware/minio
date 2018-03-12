@@ -22,6 +22,8 @@ import (
 	"io/ioutil"
 	"net/http"
 	"strings"
+
+	"github.com/minio/minio/pkg/handlers"
 )
 
 // Verify if request has JWT.
@@ -121,28 +123,19 @@ func checkRequestAuthType(r *http.Request, bucket, policyAction, region string) 
 	switch reqAuthType {
 	case authTypePresignedV2, authTypeSignedV2:
 		// Signature V2 validation.
-		s3Error := isReqAuthenticatedV2(r)
-		if s3Error != ErrNone {
-			errorIf(errSignatureMismatch, "%s", dumpRequest(r))
-		}
-		return s3Error
+		return isReqAuthenticatedV2(r)
 	case authTypeSigned, authTypePresigned:
-		s3Error := isReqAuthenticated(r, region)
-		if s3Error != ErrNone {
-			errorIf(errSignatureMismatch, "%s", dumpRequest(r))
-		}
-		return s3Error
+		return isReqAuthenticated(r, region)
 	}
 
 	if reqAuthType == authTypeAnonymous && policyAction != "" {
 		// http://docs.aws.amazon.com/AmazonS3/latest/dev/using-with-s3-actions.html
-		sourceIP := getSourceIPAddress(r)
 		resource, err := getResource(r.URL.Path, r.Host, globalDomainName)
 		if err != nil {
 			return ErrInternalError
 		}
 		return enforceBucketPolicy(bucket, policyAction, resource,
-			r.Referer(), sourceIP, r.URL.Query())
+			r.Referer(), handlers.GetSourceIP(r), r.URL.Query())
 	}
 
 	// By default return ErrAccessDenied

@@ -83,7 +83,9 @@ func (xl xlObjects) CopyObject(srcBucket, srcObject, dstBucket, dstObject string
 	cpSrcDstSame := isStringEqual(pathJoin(srcBucket, srcObject), pathJoin(dstBucket, dstObject))
 
 	// Read metadata associated with the object from all disks.
-	metaArr, errs := readAllXLMetadata(xl.getDisks(), srcBucket, srcObject)
+	storageDisks := xl.getDisks()
+
+	metaArr, errs := readAllXLMetadata(storageDisks, srcBucket, srcObject)
 
 	// get Quorum for this object
 	readQuorum, writeQuorum, err := objectQuorumFromMeta(xl, metaArr, errs)
@@ -96,7 +98,7 @@ func (xl xlObjects) CopyObject(srcBucket, srcObject, dstBucket, dstObject string
 	}
 
 	// List all online disks.
-	onlineDisks, modTime := listOnlineDisks(xl.getDisks(), metaArr, errs)
+	_, modTime := listOnlineDisks(storageDisks, metaArr, errs)
 
 	// Pick latest valid metadata.
 	xlMeta, err := pickValidXLMeta(metaArr, modTime)
@@ -104,25 +106,23 @@ func (xl xlObjects) CopyObject(srcBucket, srcObject, dstBucket, dstObject string
 		return oi, toObjectErr(err, srcBucket, srcObject)
 	}
 
-	// Reorder online disks based on erasure distribution order.
-	onlineDisks = shuffleDisks(onlineDisks, xlMeta.Erasure.Distribution)
-
 	// Length of the file to read.
 	length := xlMeta.Stat.Size
 
 	// Check if this request is only metadata update.
 	if cpSrcDstSame {
-		xlMeta.Meta = srcInfo.UserDefined
-		partsMetadata := make([]xlMetaV1, len(xl.getDisks()))
 		// Update `xl.json` content on each disks.
-		for index := range partsMetadata {
-			partsMetadata[index] = xlMeta
+		for index := range metaArr {
+			metaArr[index].Meta = srcInfo.UserDefined
+			metaArr[index].Meta["etag"] = srcInfo.ETag
 		}
+
+		var onlineDisks []StorageAPI
 
 		tempObj := mustGetUUID()
 
 		// Write unique `xl.json` for each disk.
-		if onlineDisks, err = writeUniqueXLMetadata(onlineDisks, minioMetaTmpBucket, tempObj, partsMetadata, writeQuorum); err != nil {
+		if onlineDisks, err = writeUniqueXLMetadata(storageDisks, minioMetaTmpBucket, tempObj, metaArr, writeQuorum); err != nil {
 			return oi, toObjectErr(err, srcBucket, srcObject)
 		}
 		// Rename atomically `xl.json` from tmp location to destination for each disk.
@@ -395,26 +395,7 @@ func (xl xlObjects) getObjectInfo(bucket, object string) (objInfo ObjectInfo, er
 		return objInfo, err
 	}
 
-	objInfo = ObjectInfo{
-		IsDir:           false,
-		Bucket:          bucket,
-		Name:            object,
-		Size:            xlMeta.Stat.Size,
-		ModTime:         xlMeta.Stat.ModTime,
-		ContentType:     xlMeta.Meta["content-type"],
-		ContentEncoding: xlMeta.Meta["content-encoding"],
-	}
-
-	// Extract etag.
-	objInfo.ETag = extractETag(xlMeta.Meta)
-
-	// etag/md5Sum has already been extracted. We need to
-	// remove to avoid it from appearing as part of
-	// response headers. e.g, X-Minio-* or X-Amz-*.
-	objInfo.UserDefined = cleanMetadata(xlMeta.Meta)
-
-	// Success.
-	return objInfo, nil
+	return xlMeta.ToObjectInfo(bucket, object), nil
 }
 
 func undoRename(disks []StorageAPI, srcBucket, srcEntry, dstBucket, dstEntry string, isDir bool, errs []error) {
