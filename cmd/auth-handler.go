@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2015, 2016 Minio, Inc.
+ * Minio Cloud Storage, (C) 2015-2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,12 +18,16 @@ package cmd
 
 import (
 	"bytes"
+	"context"
+	"encoding/base64"
+	"encoding/hex"
 	"errors"
 	"io/ioutil"
 	"net/http"
 	"strings"
 
-	"github.com/minio/minio/pkg/handlers"
+	"github.com/minio/minio/cmd/logger"
+	"github.com/minio/minio/pkg/policy"
 )
 
 // Verify if request has JWT.
@@ -112,33 +116,73 @@ func checkAdminRequestAuthType(r *http.Request, region string) APIErrorCode {
 		s3Err = isReqAuthenticated(r, region)
 	}
 	if s3Err != ErrNone {
-		errorIf(errors.New(getAPIError(s3Err).Description), "%s", dumpRequest(r))
+		reqInfo := (&logger.ReqInfo{}).AppendTags("requestHeaders", dumpRequest(r))
+		ctx := logger.SetReqInfo(context.Background(), reqInfo)
+		logger.LogIf(ctx, errors.New(getAPIError(s3Err).Description))
 	}
 	return s3Err
 }
 
-func checkRequestAuthType(r *http.Request, bucket, policyAction, region string) APIErrorCode {
-	reqAuthType := getRequestAuthType(r)
+func checkRequestAuthType(ctx context.Context, r *http.Request, action policy.Action, bucketName, objectName string) APIErrorCode {
+	isOwner := true
+	accountName := globalServerConfig.GetCredential().AccessKey
 
-	switch reqAuthType {
+	switch getRequestAuthType(r) {
+	case authTypeUnknown:
+		return ErrAccessDenied
 	case authTypePresignedV2, authTypeSignedV2:
-		// Signature V2 validation.
-		return isReqAuthenticatedV2(r)
-	case authTypeSigned, authTypePresigned:
-		return isReqAuthenticated(r, region)
-	}
-
-	if reqAuthType == authTypeAnonymous && policyAction != "" {
-		// http://docs.aws.amazon.com/AmazonS3/latest/dev/using-with-s3-actions.html
-		resource, err := getResource(r.URL.Path, r.Host, globalDomainName)
-		if err != nil {
-			return ErrInternalError
+		if errorCode := isReqAuthenticatedV2(r); errorCode != ErrNone {
+			return errorCode
 		}
-		return enforceBucketPolicy(bucket, policyAction, resource,
-			r.Referer(), handlers.GetSourceIP(r), r.URL.Query())
+	case authTypeSigned, authTypePresigned:
+		region := globalServerConfig.GetRegion()
+		switch action {
+		case policy.GetBucketLocationAction, policy.ListAllMyBucketsAction:
+			region = ""
+		}
+
+		if errorCode := isReqAuthenticated(r, region); errorCode != ErrNone {
+			return errorCode
+		}
+	default:
+		isOwner = false
+		accountName = ""
 	}
 
-	// By default return ErrAccessDenied
+	// LocationConstraint is valid only for CreateBucketAction.
+	var locationConstraint string
+	if action == policy.CreateBucketAction {
+		// To extract region from XML in request body, get copy of request body.
+		payload, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			logger.LogIf(ctx, err)
+			return ErrAccessDenied
+		}
+
+		// Populate payload to extract location constraint.
+		r.Body = ioutil.NopCloser(bytes.NewReader(payload))
+
+		var s3Error APIErrorCode
+		locationConstraint, s3Error = parseLocationConstraint(r)
+		if s3Error != ErrNone {
+			return ErrAccessDenied
+		}
+
+		// Populate payload again to handle it in HTTP handler.
+		r.Body = ioutil.NopCloser(bytes.NewReader(payload))
+	}
+
+	if globalPolicySys.IsAllowed(policy.Args{
+		AccountName:     accountName,
+		Action:          action,
+		BucketName:      bucketName,
+		ConditionValues: getConditionValues(r, locationConstraint),
+		IsOwner:         isOwner,
+		ObjectName:      objectName,
+	}) {
+		return ErrNone
+	}
+
 	return ErrAccessDenied
 }
 
@@ -167,12 +211,14 @@ func isReqAuthenticated(r *http.Request, region string) (s3Error APIErrorCode) {
 	if r == nil {
 		return ErrInternalError
 	}
+
 	if errCode := reqSignatureV4Verify(r, region); errCode != ErrNone {
 		return errCode
 	}
+
 	payload, err := ioutil.ReadAll(r.Body)
 	if err != nil {
-		errorIf(err, "Unable to read request body for signature verification")
+		logger.LogIf(context.Background(), err)
 		return ErrInternalError
 	}
 
@@ -180,8 +226,15 @@ func isReqAuthenticated(r *http.Request, region string) (s3Error APIErrorCode) {
 	r.Body = ioutil.NopCloser(bytes.NewReader(payload))
 
 	// Verify Content-Md5, if payload is set.
-	if r.Header.Get("Content-Md5") != "" {
-		if r.Header.Get("Content-Md5") != getMD5HashBase64(payload) {
+	if clntMD5B64, ok := r.Header["Content-Md5"]; ok {
+		if clntMD5B64[0] == "" {
+			return ErrInvalidDigest
+		}
+		md5Sum, err := base64.StdEncoding.Strict().DecodeString(clntMD5B64[0])
+		if err != nil {
+			return ErrInvalidDigest
+		}
+		if !bytes.Equal(md5Sum, getMD5Sum(payload)) {
 			return ErrBadDigest
 		}
 	}
@@ -192,12 +245,21 @@ func isReqAuthenticated(r *http.Request, region string) (s3Error APIErrorCode) {
 
 	// Verify that X-Amz-Content-Sha256 Header == sha256(payload)
 	// If X-Amz-Content-Sha256 header is not sent then we don't calculate/verify sha256(payload)
-	sum := r.Header.Get("X-Amz-Content-Sha256")
+	sumHex, ok := r.Header["X-Amz-Content-Sha256"]
 	if isRequestPresignedSignatureV4(r) {
-		sum = r.URL.Query().Get("X-Amz-Content-Sha256")
+		sumHex, ok = r.URL.Query()["X-Amz-Content-Sha256"]
 	}
-	if sum != "" && sum != getSHA256Hash(payload) {
-		return ErrContentSHA256Mismatch
+	if ok {
+		if sumHex[0] == "" {
+			return ErrContentSHA256Mismatch
+		}
+		sum, err := hex.DecodeString(sumHex[0])
+		if err != nil {
+			return ErrContentSHA256Mismatch
+		}
+		if !bytes.Equal(sum, getSHA256Sum(payload)) {
+			return ErrContentSHA256Mismatch
+		}
 	}
 	return ErrNone
 }

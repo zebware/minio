@@ -17,13 +17,16 @@
 package cmd
 
 import (
+	"context"
+	"encoding/hex"
+	"encoding/json"
 	"io"
 	"io/ioutil"
 	"os"
 	pathutil "path"
 	"strings"
 
-	"github.com/minio/minio/pkg/errors"
+	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/lock"
 	"github.com/minio/minio/pkg/mimedb"
 	"github.com/tidwall/gjson"
@@ -41,37 +44,89 @@ const (
 	fsMetaVersion100 = "1.0.0"
 
 	// FS backend meta 1.0.1 version.
-	fsMetaVersion = "1.0.1"
+	fsMetaVersion101 = "1.0.1"
 
-	// FS backend meta format.
-	fsMetaFormat = "fs"
+	// FS backend meta 1.0.2
+	// Removed the fields "Format" and "Minio" from fsMetaV1 as they were unused. Added "Checksum" field - to be used in future for bit-rot protection.
+	fsMetaVersion = "1.0.2"
 
 	// Add more constants here.
 )
 
+// FSChecksumInfoV1 - carries checksums of individual blocks on disk.
+type FSChecksumInfoV1 struct {
+	Algorithm string
+	Blocksize int64
+	Hashes    [][]byte
+}
+
+// MarshalJSON marshals the FSChecksumInfoV1 struct
+func (c FSChecksumInfoV1) MarshalJSON() ([]byte, error) {
+	type checksuminfo struct {
+		Algorithm string   `json:"algorithm"`
+		Blocksize int64    `json:"blocksize"`
+		Hashes    []string `json:"hashes"`
+	}
+	var hashes []string
+	for _, h := range c.Hashes {
+		hashes = append(hashes, hex.EncodeToString(h))
+	}
+	info := checksuminfo{
+		Algorithm: c.Algorithm,
+		Hashes:    hashes,
+		Blocksize: c.Blocksize,
+	}
+	return json.Marshal(info)
+}
+
+// UnmarshalJSON unmarshals the the given data into the FSChecksumInfoV1 struct
+func (c *FSChecksumInfoV1) UnmarshalJSON(data []byte) error {
+	type checksuminfo struct {
+		Algorithm string   `json:"algorithm"`
+		Blocksize int64    `json:"blocksize"`
+		Hashes    []string `json:"hashes"`
+	}
+
+	var info checksuminfo
+	err := json.Unmarshal(data, &info)
+	if err != nil {
+		return err
+	}
+	c.Algorithm = info.Algorithm
+	c.Blocksize = info.Blocksize
+	var hashes [][]byte
+	for _, hashStr := range info.Hashes {
+		h, err := hex.DecodeString(hashStr)
+		if err != nil {
+			return err
+		}
+		hashes = append(hashes, h)
+	}
+	c.Hashes = hashes
+	return nil
+}
+
 // A fsMetaV1 represents a metadata header mapping keys to sets of values.
 type fsMetaV1 struct {
 	Version string `json:"version"`
-	Format  string `json:"format"`
-	Minio   struct {
-		Release string `json:"release"`
-	} `json:"minio"`
-	// Metadata map for current object `fs.json`.
-	Meta  map[string]string `json:"meta,omitempty"`
-	Parts []objectPartInfo  `json:"parts,omitempty"`
+	// checksums of blocks on disk.
+	Checksum FSChecksumInfoV1 `json:"checksum,omitempty"`
+	// Metadata map for current object.
+	Meta map[string]string `json:"meta,omitempty"`
+	// parts info for current object - used in encryption.
+	Parts []objectPartInfo `json:"parts,omitempty"`
 }
 
 // IsValid - tells if the format is sane by validating the version
 // string and format style.
 func (m fsMetaV1) IsValid() bool {
-	return isFSMetaValid(m.Version, m.Format)
+	return isFSMetaValid(m.Version)
 }
 
-// Verifies if the backend format metadata is sane by validating
-// the version string and format style.
-func isFSMetaValid(version, format string) bool {
-	return ((version == fsMetaVersion || version == fsMetaVersion100) &&
-		format == fsMetaFormat)
+// Verifies if the backend format metadata is same by validating
+// the version string.
+func isFSMetaValid(version string) bool {
+	return (version == fsMetaVersion || version == fsMetaVersion100 || version == fsMetaVersion101)
 }
 
 // Converts metadata to object info.
@@ -111,10 +166,14 @@ func (m fsMetaV1) ToObjectInfo(bucket, object string, fi os.FileInfo) ObjectInfo
 		}
 	}
 
-	// Extract etag from metadata.
 	objInfo.ETag = extractETag(m.Meta)
 	objInfo.ContentType = m.Meta["content-type"]
 	objInfo.ContentEncoding = m.Meta["content-encoding"]
+	if storageClass, ok := m.Meta[amzStorageClass]; ok {
+		objInfo.StorageClass = storageClass
+	} else {
+		objInfo.StorageClass = globalMinioDefaultStorageClass
+	}
 
 	// etag/md5Sum has already been extracted. We need to
 	// remove to avoid it from appearing as part of
@@ -141,14 +200,6 @@ func (m *fsMetaV1) WriteTo(lk *lock.LockedFile) (n int64, err error) {
 
 func parseFSVersion(fsMetaBuf []byte) string {
 	return gjson.GetBytes(fsMetaBuf, "version").String()
-}
-
-func parseFSFormat(fsMetaBuf []byte) string {
-	return gjson.GetBytes(fsMetaBuf, "format").String()
-}
-
-func parseFSRelease(fsMetaBuf []byte) string {
-	return gjson.GetBytes(fsMetaBuf, "minio.release").String()
 }
 
 func parseFSMetaMap(fsMetaBuf []byte) map[string]string {
@@ -183,32 +234,34 @@ func parseFSPartsArray(fsMetaBuf []byte) []objectPartInfo {
 	return partsArray
 }
 
-func (m *fsMetaV1) ReadFrom(lk *lock.LockedFile) (n int64, err error) {
+func (m *fsMetaV1) ReadFrom(ctx context.Context, lk *lock.LockedFile) (n int64, err error) {
 	var fsMetaBuf []byte
 	fi, err := lk.Stat()
 	if err != nil {
-		return 0, errors.Trace(err)
+		logger.LogIf(ctx, err)
+		return 0, err
 	}
 
 	fsMetaBuf, err = ioutil.ReadAll(io.NewSectionReader(lk, 0, fi.Size()))
 	if err != nil {
-		return 0, errors.Trace(err)
+		logger.LogIf(ctx, err)
+		return 0, err
 	}
 
 	if len(fsMetaBuf) == 0 {
-		return 0, errors.Trace(io.EOF)
+		logger.LogIf(ctx, io.EOF)
+		return 0, io.EOF
 	}
 
 	// obtain version.
 	m.Version = parseFSVersion(fsMetaBuf)
 
-	// obtain format.
-	m.Format = parseFSFormat(fsMetaBuf)
-
 	// Verify if the format is valid, return corrupted format
 	// for unrecognized formats.
-	if !isFSMetaValid(m.Version, m.Format) {
-		return 0, errors.Trace(errCorruptedFormat)
+	if !isFSMetaValid(m.Version) {
+		logger.GetReqInfo(ctx).AppendTags("file", lk.Name())
+		logger.LogIf(ctx, errCorruptedFormat)
+		return 0, errCorruptedFormat
 	}
 
 	// obtain parts information
@@ -216,9 +269,6 @@ func (m *fsMetaV1) ReadFrom(lk *lock.LockedFile) (n int64, err error) {
 
 	// obtain metadata.
 	m.Meta = parseFSMetaMap(fsMetaBuf)
-
-	// obtain minio release date.
-	m.Minio.Release = parseFSRelease(fsMetaBuf)
 
 	// Success.
 	return int64(len(fsMetaBuf)), nil
@@ -228,7 +278,5 @@ func (m *fsMetaV1) ReadFrom(lk *lock.LockedFile) (n int64, err error) {
 func newFSMetaV1() (fsMeta fsMetaV1) {
 	fsMeta = fsMetaV1{}
 	fsMeta.Version = fsMetaVersion
-	fsMeta.Format = fsMetaFormat
-	fsMeta.Minio.Release = ReleaseTag
 	return fsMeta
 }

@@ -23,7 +23,7 @@ import (
 
 	"github.com/elazarl/go-bindata-assetfs"
 	"github.com/gorilla/handlers"
-	router "github.com/gorilla/mux"
+	"github.com/gorilla/mux"
 	jsonrpc "github.com/gorilla/rpc/v2"
 	"github.com/gorilla/rpc/v2/json2"
 	"github.com/minio/minio/browser"
@@ -32,6 +32,7 @@ import (
 // webAPI container for Web API.
 type webAPIHandlers struct {
 	ObjectAPI func() ObjectLayer
+	CacheAPI  func() CacheObjectLayer
 }
 
 // indexHandler - Handler to serve index.html
@@ -59,17 +60,18 @@ func assetFS() *assetfs.AssetFS {
 const specialAssets = ".*index_bundle.*.js$|.*loader.css$|.*logo.svg$|.*firefox.png$|.*safari.png$|.*chrome.png$|.*favicon.ico$"
 
 // registerWebRouter - registers web router for serving minio browser.
-func registerWebRouter(mux *router.Router) error {
+func registerWebRouter(router *mux.Router) error {
 	// Initialize Web.
 	web := &webAPIHandlers{
 		ObjectAPI: newObjectLayerFn,
+		CacheAPI:  newCacheObjectsFn,
 	}
 
 	// Initialize a new json2 codec.
 	codec := json2.NewCodec()
 
 	// Minio browser router.
-	webBrowserRouter := mux.NewRoute().PathPrefix(minioReservedBucketPath).Subrouter()
+	webBrowserRouter := router.PathPrefix(minioReservedBucketPath).Subrouter()
 
 	// Initialize json rpc handlers.
 	webRPC := jsonrpc.NewServer()

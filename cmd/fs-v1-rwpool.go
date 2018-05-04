@@ -17,10 +17,12 @@
 package cmd
 
 import (
+	"context"
 	"os"
 	pathutil "path"
 	"sync"
 
+	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/lock"
 )
 
@@ -48,7 +50,9 @@ func (fsi *fsIOPool) lookupToRead(path string) (*lock.RLockedFile, bool) {
 		// If the file is closed and not removed from map is a bug.
 		if rlkFile.IsClosed() {
 			// Log this as an error.
-			errorIf(errUnexpected, "Unexpected entry found on the map %s", path)
+			reqInfo := (&logger.ReqInfo{}).AppendTags("path", path)
+			ctx := logger.SetReqInfo(context.Background(), reqInfo)
+			logger.LogIf(ctx, errUnexpected)
 
 			// Purge the cached lock path from map.
 			delete(fsi.readersMap, path)
@@ -164,12 +168,7 @@ func (fsi *fsIOPool) Create(path string) (wlk *lock.LockedFile, err error) {
 	}
 
 	// Creates parent if missing.
-	if err = os.MkdirAll(pathutil.Dir(path), 0777); err != nil {
-		if os.IsPermission(err) {
-			return nil, errFileAccessDenied
-		} else if isSysErrNotDir(err) {
-			return nil, errFileAccessDenied
-		}
+	if err = mkdirAll(pathutil.Dir(path), 0777); err != nil {
 		return nil, err
 	}
 

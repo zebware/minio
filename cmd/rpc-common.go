@@ -23,9 +23,15 @@ import (
 	"github.com/minio/dsync"
 )
 
-// Allow any RPC call request time should be no more/less than 3 seconds.
-// 3 seconds is chosen arbitrarily.
-const rpcSkewTimeAllowed = 3 * time.Second
+// Allow any RPC call request time should be no more/less than 15 minutes.
+// 15 minute is chosen to be best for majority use cases.
+const rpcSkewTimeAllowed = 15 * time.Minute
+
+// RPC V1 - Initial version
+// RPC V2 - format.json XL version changed to 2
+// RPC V3 - format.json XL version changed to 3
+// Current RPC version
+var globalRPCAPIVersion = semVersion{3, 0, 0}
 
 func isRequestTimeAllowed(requestTime time.Time) bool {
 	// Check whether request time is within acceptable skew time.

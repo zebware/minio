@@ -16,7 +16,9 @@
 
 package cmd
 
-import "time"
+import (
+	"time"
+)
 
 // SystemLockState - Structure to fill the lock state of entire object storage.
 // That is the total locks held, total calls blocked on locks and state of all the locks for the entire system.
@@ -62,10 +64,4 @@ type OpsLockState struct {
 	LockType    lockType   `json:"type"`   // Lock type (RLock, WLock)
 	Status      statusType `json:"status"` // Status can be Running/Ready/Blocked.
 	Since       time.Time  `json:"since"`  // Time when the lock was initially held.
-}
-
-// listLocksInfo - Fetches locks held on bucket, matching prefix held for longer than duration.
-func listLocksInfo(bucket, prefix string, duration time.Duration) []VolumeLockInfo {
-	locksInfo, _ := newObjectLayerFn().ListLocks(bucket, prefix, duration)
-	return locksInfo
 }

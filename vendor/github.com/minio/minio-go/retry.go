@@ -26,7 +26,7 @@ import (
 )
 
 // MaxRetry is the maximum number of retries before stopping.
-var MaxRetry = 5
+var MaxRetry = 10
 
 // MaxJitter will randomize over the full exponential backoff time
 const MaxJitter = 1.0
@@ -110,6 +110,9 @@ func isNetErrorRetryable(err error) bool {
 				return true
 			} else if strings.Contains(err.Error(), "connection timed out") {
 				// If err is a net.Dial timeout, retry.
+				return true
+			} else if strings.Contains(err.Error(), "net/http: HTTP/1.x transport connection broken") {
+				// If error is transport connection broken, retry.
 				return true
 			}
 		}

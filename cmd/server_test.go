@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2015, 2016, 2017 Minio, Inc.
+ * Minio Cloud Storage, (C) 2015, 2016, 2017, 2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"crypto/x509"
 	"encoding/xml"
@@ -35,6 +36,7 @@ import (
 	"time"
 
 	humanize "github.com/dustin/go-humanize"
+	"github.com/minio/minio/pkg/policy"
 )
 
 // API suite container common to both FS and XL.
@@ -75,13 +77,10 @@ func verifyError(c *check, response *http.Response, code, description string, st
 
 func runAllTests(suite *TestSuiteCommon, c *check) {
 	suite.SetUpSuite(c)
-	suite.TestBucketSQSNotificationWebHook(c)
 	suite.TestObjectDir(c)
-	suite.TestBucketSQSNotificationAMQP(c)
 	suite.TestBucketPolicy(c)
 	suite.TestDeleteBucket(c)
 	suite.TestDeleteBucketNotEmpty(c)
-	suite.TestListenBucketNotificationHandler(c)
 	suite.TestDeleteMultipleObjects(c)
 	suite.TestDeleteObject(c)
 	suite.TestNonExistentBucket(c)
@@ -321,7 +320,7 @@ func (s *TestSuiteCommon) TestBucketSQSNotificationAMQP(c *check) {
 // Deletes the policy and verifies the deletion by fetching it back.
 func (s *TestSuiteCommon) TestBucketPolicy(c *check) {
 	// Sample bucket policy.
-	bucketPolicyBuf := `{"Version":"2012-10-17","Statement":[{"Action":["s3:GetBucketLocation","s3:ListBucket"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::%s"],"Sid":""},{"Action":["s3:GetObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::%s/this*"],"Sid":""}]}`
+	bucketPolicyBuf := `{"Version":"2012-10-17","Statement":[{"Action":["s3:GetBucketLocation","s3:ListBucket"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::%s"]},{"Action":["s3:GetObject"],"Effect":"Allow","Principal":{"AWS":["*"]},"Resource":["arn:aws:s3:::%s/this*"]}]}`
 
 	// generate a random bucket Name.
 	bucketName := getRandomBucketName()
@@ -363,7 +362,11 @@ func (s *TestSuiteCommon) TestBucketPolicy(c *check) {
 	bucketPolicyReadBuf, err := ioutil.ReadAll(response.Body)
 	c.Assert(err, nil)
 	// Verify if downloaded policy matches with previousy uploaded.
-	c.Assert(bytes.Equal([]byte(bucketPolicyStr), bucketPolicyReadBuf), true)
+	expectedPolicy, err := policy.ParseConfig(strings.NewReader(bucketPolicyStr), bucketName)
+	c.Assert(err, nil)
+	gotPolicy, err := policy.ParseConfig(bytes.NewReader(bucketPolicyReadBuf), bucketName)
+	c.Assert(err, nil)
+	c.Assert(reflect.DeepEqual(expectedPolicy, gotPolicy), true)
 
 	// Delete policy.
 	request, err = newTestSignedRequest("DELETE", getDeletePolicyURL(s.endPoint, bucketName), 0, nil,
@@ -2739,7 +2742,7 @@ func (s *TestSuiteCommon) TestObjectMultipart(c *check) {
 		part.ETag = canonicalizeETag(part.ETag)
 		parts = append(parts, part)
 	}
-	etag, err := getCompleteMultipartMD5(parts)
+	etag, err := getCompleteMultipartMD5(context.Background(), parts)
 	c.Assert(err, nil)
 	c.Assert(canonicalizeETag(response.Header.Get("Etag")), etag)
 }

@@ -53,21 +53,6 @@ chmod +x minio
 ./minio server /data
 ```
 
-### 快照版
-你可以下载最新版 `minio` [快照](https://snapcraft.io), 并且帮助我们一起验证master分支上[所有支持的Linux发行版](https://snapcraft.io/docs/core/install) 的一些最新修改:
-
-```sh
-sudo snap install minio --edge
-```
-
-每次有最新的 `minio` 被推送到服务器,你都会自动更新下来.
-
-你需要允许minio snap来观察其安装:
-
-```sh
-sudo snap connect minio:mount-observe
-```
-
 ## 微软Windows系统
 ### 下载二进制文件
 | 操作系统| CPU架构 | 地址|
@@ -99,7 +84,7 @@ go get -u github.com/minio/minio
 ## 使用Minio浏览器进行验证
 安装后使用浏览器访问[http://127.0.0.1:9000](http://127.0.0.1:9000)，如果可以访问，则表示minio已经安装成功。
 
-![Screenshot](https://github.com/minio/minio/blob/master/docs/screenshots/minio-browser.jpg?raw=true)
+![Screenshot](https://github.com/minio/minio/blob/master/docs/screenshots/minio-browser.png?raw=true)
 
 ## 使用Minio客户端 `mc`进行验证
 `mc` 提供了一些UNIX常用命令的替代品，像ls, cat, cp, mirror, diff这些。 它支持文件系统和亚马逊S3云存储服务。 更多信息请参考 [mc快速入门](https://docs.minio.io/docs/minio-client-quickstart-guide) 。

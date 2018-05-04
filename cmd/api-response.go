@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2015, 2016, 2017 Minio, Inc.
+ * Minio Cloud Storage, (C) 2015, 2016, 2017, 2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -27,7 +27,6 @@ import (
 )
 
 const (
-	timeFormatAMZ     = "2006-01-02T15:04:05Z"     // Reply date format
 	timeFormatAMZLong = "2006-01-02T15:04:05.000Z" // Reply date format with nanosecond precision.
 	maxObjectList     = 1000                       // Limit number of objects in a listObjectsResponse.
 	maxUploadsList    = 1000                       // Limit number of uploads in a listUploadsResponse.
@@ -269,11 +268,6 @@ type PostResponse struct {
 	Location string
 }
 
-// getLocation get URL location.
-func getLocation(r *http.Request) string {
-	return path.Clean(r.URL.Path) // Clean any trailing slashes.
-}
-
 // returns "https" if the tls boolean is true, "http" otherwise.
 func getURLScheme(tls bool) string {
 	if tls {
@@ -284,6 +278,10 @@ func getURLScheme(tls bool) string {
 
 // getObjectLocation gets the fully qualified URL of an object.
 func getObjectLocation(r *http.Request, domain, bucket, object string) string {
+	// unit tests do not have host set.
+	if r.Host == "" {
+		return path.Clean(r.URL.Path)
+	}
 	proto := handlers.GetSourceScheme(r)
 	if proto == "" {
 		proto = getURLScheme(globalIsSSL)
@@ -341,7 +339,7 @@ func generateListObjectsV1Response(bucket, prefix, marker, delimiter string, max
 			content.ETag = "\"" + object.ETag + "\""
 		}
 		content.Size = object.Size
-		content.StorageClass = globalMinioDefaultStorageClass
+		content.StorageClass = object.StorageClass
 		content.Owner = owner
 		contents = append(contents, content)
 	}
@@ -387,7 +385,7 @@ func generateListObjectsV2Response(bucket, prefix, token, nextToken, startAfter,
 			content.ETag = "\"" + object.ETag + "\""
 		}
 		content.Size = object.Size
-		content.StorageClass = globalMinioDefaultStorageClass
+		content.StorageClass = object.StorageClass
 		content.Owner = owner
 		contents = append(contents, content)
 	}

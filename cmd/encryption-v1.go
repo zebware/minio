@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/rand"
@@ -27,7 +28,9 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 
+	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/ioutil"
 	sha256 "github.com/minio/sha256-simd"
 	"github.com/minio/sio"
@@ -35,14 +38,15 @@ import (
 
 var (
 	// AWS errors for invalid SSE-C requests.
-	errInsecureSSERequest  = errors.New("Requests specifying Server Side Encryption with Customer provided keys must be made over a secure connection")
-	errEncryptedObject     = errors.New("The object was stored using a form of Server Side Encryption. The correct parameters must be provided to retrieve the object")
-	errInvalidSSEAlgorithm = errors.New("Requests specifying Server Side Encryption with Customer provided keys must provide a valid encryption algorithm")
-	errMissingSSEKey       = errors.New("Requests specifying Server Side Encryption with Customer provided keys must provide an appropriate secret key")
-	errInvalidSSEKey       = errors.New("The secret key was invalid for the specified algorithm")
-	errMissingSSEKeyMD5    = errors.New("Requests specifying Server Side Encryption with Customer provided keys must provide the client calculated MD5 of the secret key")
-	errSSEKeyMD5Mismatch   = errors.New("The calculated MD5 hash of the key did not match the hash that was provided")
-	errSSEKeyMismatch      = errors.New("The client provided key does not match the key provided when the object was encrypted") // this msg is not shown to the client
+	errInsecureSSERequest   = errors.New("SSE-C requests require TLS connections")
+	errEncryptedObject      = errors.New("The object was stored using a form of SSE")
+	errInvalidSSEAlgorithm  = errors.New("The SSE-C algorithm is not valid")
+	errMissingSSEKey        = errors.New("The SSE-C request is missing the customer key")
+	errInvalidSSEKey        = errors.New("The SSE-C key is invalid")
+	errMissingSSEKeyMD5     = errors.New("The SSE-C request is missing the customer key MD5")
+	errSSEKeyMD5Mismatch    = errors.New("The key MD5 does not match the SSE-C key")
+	errSSEKeyMismatch       = errors.New("The SSE-C key is not correct")                  // access denied
+	errInvalidSSEParameters = errors.New("The SSE-C key for key-rotation is not correct") // special access denied
 
 	// Additional Minio errors for SSE-C requests.
 	errObjectTampered = errors.New("The requested object was modified and may be compromised")
@@ -247,9 +251,6 @@ func ParseSSECustomerHeader(header http.Header) (key []byte, err error) {
 
 // This function rotates old to new key.
 func rotateKey(oldKey []byte, newKey []byte, metadata map[string]string) error {
-	if subtle.ConstantTimeCompare(oldKey, newKey) == 1 {
-		return nil
-	}
 	delete(metadata, SSECustomerKey) // make sure we do not save the key by accident
 
 	if metadata[ServerSideEncryptionSealAlgorithm] != SSESealAlgorithmDareSha256 { // currently DARE-SHA256 is the only option
@@ -273,10 +274,14 @@ func rotateKey(oldKey []byte, newKey []byte, metadata map[string]string) error {
 	n, err := sio.Decrypt(objectEncryptionKey, bytes.NewReader(sealedKey), sio.Config{
 		Key: keyEncryptionKey,
 	})
-	if n != 32 || err != nil {
-		// Either the provided key does not match or the object was tampered.
-		// To provide strict AWS S3 compatibility we return: access denied.
-		return errSSEKeyMismatch
+	if n != 32 || err != nil { // Either the provided key does not match or the object was tampered.
+		if subtle.ConstantTimeCompare(oldKey, newKey) == 1 {
+			return errInvalidSSEParameters // AWS returns special error for equal but invalid keys.
+		}
+		return errSSEKeyMismatch // To provide strict AWS S3 compatibility we return: access denied.
+	}
+	if subtle.ConstantTimeCompare(oldKey, newKey) == 1 {
+		return nil // we don't need to rotate keys if newKey == oldKey
 	}
 
 	nonce := make([]byte, 32) // generate random values for key derivation
@@ -623,9 +628,9 @@ func DecryptBlocksRequest(client io.Writer, r *http.Request, startOffset, length
 	var partStartOffset = startOffset
 	// Skip parts until final offset maps to a particular part offset.
 	for i, part := range objInfo.Parts {
-		decryptedSize, err := decryptedSize(part.Size)
+		decryptedSize, err := sio.DecryptedSize(uint64(part.Size))
 		if err != nil {
-			return nil, -1, -1, err
+			return nil, -1, -1, errObjectTampered
 		}
 
 		partStartIndex = i
@@ -633,12 +638,12 @@ func DecryptBlocksRequest(client io.Writer, r *http.Request, startOffset, length
 		// Offset is smaller than size we have reached the
 		// proper part offset, break out we start from
 		// this part index.
-		if partStartOffset < decryptedSize {
+		if partStartOffset < int64(decryptedSize) {
 			break
 		}
 
 		// Continue to look for next part.
-		partStartOffset -= decryptedSize
+		partStartOffset -= int64(decryptedSize)
 	}
 
 	startSeqNum := partStartOffset / sseDAREPackageBlockSize
@@ -734,41 +739,33 @@ func (li *ListPartsInfo) IsEncrypted() bool {
 	return false
 }
 
-func decryptedSize(encryptedSize int64) (int64, error) {
-	if encryptedSize == 0 {
-		return encryptedSize, nil
-	}
-	size := (encryptedSize / (sseDAREPackageBlockSize + sseDAREPackageMetaSize)) * sseDAREPackageBlockSize
-	if mod := encryptedSize % (sseDAREPackageBlockSize + sseDAREPackageMetaSize); mod > 0 {
-		if mod < sseDAREPackageMetaSize+1 {
-			return -1, errObjectTampered // object is not 0 size but smaller than the smallest valid encrypted object
-		}
-		size += mod - sseDAREPackageMetaSize
-	}
-	return size, nil
-}
-
 // DecryptedSize returns the size of the object after decryption in bytes.
 // It returns an error if the object is not encrypted or marked as encrypted
 // but has an invalid size.
-// DecryptedSize panics if the referred object is not encrypted.
 func (o *ObjectInfo) DecryptedSize() (int64, error) {
 	if !o.IsEncrypted() {
-		panic("cannot compute decrypted size of an object which is not encrypted")
+		return 0, errors.New("Cannot compute decrypted size of an unencrypted object")
 	}
-
-	return decryptedSize(o.Size)
+	size, err := sio.DecryptedSize(uint64(o.Size))
+	if err != nil {
+		err = errObjectTampered // assign correct error type
+	}
+	return int64(size), err
 }
 
 // EncryptedSize returns the size of the object after encryption.
 // An encrypted object is always larger than a plain object
 // except for zero size objects.
 func (o *ObjectInfo) EncryptedSize() int64 {
-	size := (o.Size / sseDAREPackageBlockSize) * (sseDAREPackageBlockSize + sseDAREPackageMetaSize)
-	if mod := o.Size % (sseDAREPackageBlockSize); mod > 0 {
-		size += mod + sseDAREPackageMetaSize
+	size, err := sio.EncryptedSize(uint64(o.Size))
+	if err != nil {
+		// This cannot happen since AWS S3 allows parts to be 5GB at most
+		// sio max. size is 256 TB
+		reqInfo := (&logger.ReqInfo{}).AppendTags("size", strconv.FormatUint(size, 10))
+		ctx := logger.SetReqInfo(context.Background(), reqInfo)
+		logger.CriticalIf(ctx, err)
 	}
-	return size
+	return int64(size)
 }
 
 // DecryptCopyObjectInfo tries to decrypt the provided object if it is encrypted.

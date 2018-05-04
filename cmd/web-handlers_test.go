@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2016, 2017 Minio, Inc.
+ * Minio Cloud Storage, (C) 2016, 2017, 2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,6 +19,7 @@ package cmd
 import (
 	"archive/zip"
 	"bytes"
+	"context"
 	"crypto/md5"
 	"encoding/hex"
 	"encoding/json"
@@ -36,10 +37,26 @@ import (
 
 	jwtgo "github.com/dgrijalva/jwt-go"
 	humanize "github.com/dustin/go-humanize"
-	"github.com/minio/minio-go/pkg/policy"
-	"github.com/minio/minio-go/pkg/set"
+	miniogopolicy "github.com/minio/minio-go/pkg/policy"
 	"github.com/minio/minio/pkg/hash"
+	"github.com/minio/minio/pkg/policy"
+	"github.com/minio/minio/pkg/policy/condition"
 )
+
+// Implement a dummy flush writer.
+type flushWriter struct {
+	io.Writer
+}
+
+// Flush writer is a dummy writer compatible with http.Flusher and http.ResponseWriter.
+func (f *flushWriter) Flush()                            {}
+func (f *flushWriter) Write(b []byte) (n int, err error) { return f.Writer.Write(b) }
+func (f *flushWriter) Header() http.Header               { return http.Header{} }
+func (f *flushWriter) WriteHeader(code int)              {}
+
+func newFlushWriter(writer io.Writer) http.ResponseWriter {
+	return &flushWriter{writer}
+}
 
 // Tests private function writeWebErrorResponse.
 func TestWriteWebErrorResponse(t *testing.T) {
@@ -325,7 +342,7 @@ func testDeleteBucketWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 	}
 
 	bucketName := getRandomBucketName()
-	err = obj.MakeBucketWithLocation(bucketName, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketName, "")
 	if err != nil {
 		t.Fatalf("failed to create bucket: %s (%s)", err.Error(), instanceType)
 	}
@@ -339,10 +356,11 @@ func testDeleteBucketWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 		// Empty string = no error
 		expect string
 	}{
-		{"", false, token, "Bucket Name  is invalid"},
+		{"", false, token, "The specified bucket  does not exist."},
 		{".", false, "auth", "Authentication failed"},
-		{".", false, token, "Bucket Name . is invalid"},
-		{"ab", false, token, "Bucket Name ab is invalid"},
+		{".", false, token, "The specified bucket . does not exist."},
+		{"..", false, token, "The specified bucket .. does not exist."},
+		{"ab", false, token, "The specified bucket ab does not exist."},
 		{"minio", false, "false token", "Authentication failed"},
 		{"minio", false, token, "specified bucket minio does not exist"},
 		{bucketName, false, token, ""},
@@ -353,7 +371,7 @@ func testDeleteBucketWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 	for _, test := range testCases {
 		if test.initWithObject {
 			data := bytes.NewBufferString("hello")
-			_, err = obj.PutObject(test.bucketName, "object", mustGetHashReader(t, data, int64(data.Len()), "", ""), nil)
+			_, err = obj.PutObject(context.Background(), test.bucketName, "object", mustGetHashReader(t, data, int64(data.Len()), "", ""), nil)
 			// _, err = obj.PutObject(test.bucketName, "object", int64(data.Len()), data, nil, "")
 			if err != nil {
 				t.Fatalf("could not put object to %s, %s", test.bucketName, err.Error())
@@ -390,7 +408,7 @@ func testDeleteBucketWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 
 		// If we created the bucket with an object, now delete the object to cleanup.
 		if test.initWithObject {
-			err = obj.DeleteObject(test.bucketName, "object")
+			err = obj.DeleteObject(context.Background(), test.bucketName, "object")
 			if err != nil {
 				t.Fatalf("could not delete object, %s", err.Error())
 			}
@@ -402,7 +420,7 @@ func testDeleteBucketWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 			continue
 		}
 
-		err = obj.MakeBucketWithLocation(bucketName, "")
+		err = obj.MakeBucketWithLocation(context.Background(), bucketName, "")
 		if err != nil {
 			// failed to create new bucket, abort.
 			t.Fatalf("failed to create new bucket (%s): %s", instanceType, err.Error())
@@ -430,7 +448,7 @@ func testListBucketsWebHandler(obj ObjectLayer, instanceType string, t TestErrHa
 
 	bucketName := getRandomBucketName()
 	// Create bucket.
-	err = obj.MakeBucketWithLocation(bucketName, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketName, "")
 	if err != nil {
 		// failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err)
@@ -481,7 +499,7 @@ func testListObjectsWebHandler(obj ObjectLayer, instanceType string, t TestErrHa
 	objectSize := 1 * humanize.KiByte
 
 	// Create bucket.
-	err = obj.MakeBucketWithLocation(bucketName, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketName, "")
 	if err != nil {
 		// failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err)
@@ -489,7 +507,7 @@ func testListObjectsWebHandler(obj ObjectLayer, instanceType string, t TestErrHa
 
 	data := bytes.Repeat([]byte("a"), objectSize)
 	metadata := map[string]string{"etag": "c9a34cfc85d982698c6ac89f76071abd"}
-	_, err = obj.PutObject(bucketName, objectName, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), metadata["etag"], ""), metadata)
+	_, err = obj.PutObject(context.Background(), bucketName, objectName, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), metadata["etag"], ""), metadata)
 
 	if err != nil {
 		t.Fatalf("Was not able to upload an object, %v", err)
@@ -538,12 +556,22 @@ func testListObjectsWebHandler(obj ObjectLayer, instanceType string, t TestErrHa
 		t.Fatalf("Expected error `%s`", err)
 	}
 
-	policy := policy.BucketAccessPolicy{
-		Version:    "1.0",
-		Statements: []policy.Statement{getReadOnlyObjectStatement(bucketName, "")},
+	bucketPolicy := &policy.Policy{
+		Version: policy.DefaultVersion,
+		Statements: []policy.Statement{policy.NewStatement(
+			policy.Allow,
+			policy.NewPrincipal("*"),
+			policy.NewActionSet(policy.GetObjectAction),
+			policy.NewResourceSet(policy.NewResource(bucketName, "*")),
+			condition.NewFunctions(),
+		)},
 	}
 
-	obj.SetBucketPolicy(bucketName, policy)
+	if err = obj.SetBucketPolicy(context.Background(), bucketName, bucketPolicy); err != nil {
+		t.Fatalf("unexpected error. %v", err)
+	}
+	globalPolicySys.Set(bucketName, *bucketPolicy)
+	defer globalPolicySys.Remove(bucketName)
 
 	// Unauthenticated ListObjects with READ bucket policy should succeed.
 	err, reply = test("")
@@ -575,7 +603,7 @@ func testRemoveObjectWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 	objectSize := 1 * humanize.KiByte
 
 	// Create bucket.
-	err = obj.MakeBucketWithLocation(bucketName, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketName, "")
 	if err != nil {
 		// failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err)
@@ -583,14 +611,14 @@ func testRemoveObjectWebHandler(obj ObjectLayer, instanceType string, t TestErrH
 
 	data := bytes.Repeat([]byte("a"), objectSize)
 	metadata := map[string]string{"etag": "c9a34cfc85d982698c6ac89f76071abd"}
-	_, err = obj.PutObject(bucketName, objectName, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), metadata["etag"], ""), metadata)
+	_, err = obj.PutObject(context.Background(), bucketName, objectName, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), metadata["etag"], ""), metadata)
 	if err != nil {
 		t.Fatalf("Was not able to upload an object, %v", err)
 	}
 
 	objectName = "a/object"
 	metadata = map[string]string{"etag": "c9a34cfc85d982698c6ac89f76071abd"}
-	_, err = obj.PutObject(bucketName, objectName, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), metadata["etag"], ""), metadata)
+	_, err = obj.PutObject(context.Background(), bucketName, objectName, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), metadata["etag"], ""), metadata)
 	if err != nil {
 		t.Fatalf("Was not able to upload an object, %v", err)
 	}
@@ -878,7 +906,7 @@ func testUploadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler
 		return rec.Code
 	}
 	// Create bucket.
-	err = obj.MakeBucketWithLocation(bucketName, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketName, "")
 	if err != nil {
 		// failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err)
@@ -891,7 +919,7 @@ func testUploadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler
 	}
 
 	var byteBuffer bytes.Buffer
-	err = obj.GetObject(bucketName, objectName, 0, int64(len(content)), &byteBuffer, "")
+	err = obj.GetObject(context.Background(), bucketName, objectName, 0, int64(len(content)), &byteBuffer, "")
 	if err != nil {
 		t.Fatalf("Failed, %v", err)
 	}
@@ -912,12 +940,22 @@ func testUploadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandler
 		t.Fatalf("Expected the response status to be 403, but instead found `%d`", code)
 	}
 
-	bp := policy.BucketAccessPolicy{
-		Version:    "1.0",
-		Statements: []policy.Statement{getWriteOnlyObjectStatement(bucketName, "")},
+	bucketPolicy := &policy.Policy{
+		Version: policy.DefaultVersion,
+		Statements: []policy.Statement{policy.NewStatement(
+			policy.Allow,
+			policy.NewPrincipal("*"),
+			policy.NewActionSet(policy.PutObjectAction),
+			policy.NewResourceSet(policy.NewResource(bucketName, "*")),
+			condition.NewFunctions(),
+		)},
 	}
 
-	obj.SetBucketPolicy(bucketName, bp)
+	if err := obj.SetBucketPolicy(context.Background(), bucketName, bucketPolicy); err != nil {
+		t.Fatalf("unexpected error. %v", err)
+	}
+	globalPolicySys.Set(bucketName, *bucketPolicy)
+	defer globalPolicySys.Remove(bucketName)
 
 	// Unauthenticated upload with WRITE policy should succeed.
 	code = test("", true)
@@ -963,7 +1001,7 @@ func testDownloadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandl
 	}
 
 	// Create bucket.
-	err = obj.MakeBucketWithLocation(bucketName, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketName, "")
 	if err != nil {
 		// failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err)
@@ -971,7 +1009,7 @@ func testDownloadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandl
 
 	content := []byte("temporary file's content")
 	metadata := map[string]string{"etag": "01ce59706106fe5e02e7f55fffda7f34"}
-	_, err = obj.PutObject(bucketName, objectName, mustGetHashReader(t, bytes.NewReader(content), int64(len(content)), metadata["etag"], ""), metadata)
+	_, err = obj.PutObject(context.Background(), bucketName, objectName, mustGetHashReader(t, bytes.NewReader(content), int64(len(content)), metadata["etag"], ""), metadata)
 	if err != nil {
 		t.Fatalf("Was not able to upload an object, %v", err)
 	}
@@ -1019,12 +1057,22 @@ func testDownloadWebHandler(obj ObjectLayer, instanceType string, t TestErrHandl
 		t.Fatalf("Expected the response status to be 403, but instead found `%d`", code)
 	}
 
-	bp := policy.BucketAccessPolicy{
-		Version:    "1.0",
-		Statements: []policy.Statement{getReadOnlyObjectStatement(bucketName, "")},
+	bucketPolicy := &policy.Policy{
+		Version: policy.DefaultVersion,
+		Statements: []policy.Statement{policy.NewStatement(
+			policy.Allow,
+			policy.NewPrincipal("*"),
+			policy.NewActionSet(policy.GetObjectAction),
+			policy.NewResourceSet(policy.NewResource(bucketName, "*")),
+			condition.NewFunctions(),
+		)},
 	}
 
-	obj.SetBucketPolicy(bucketName, bp)
+	if err := obj.SetBucketPolicy(context.Background(), bucketName, bucketPolicy); err != nil {
+		t.Fatalf("unexpected error. %v", err)
+	}
+	globalPolicySys.Set(bucketName, *bucketPolicy)
+	defer globalPolicySys.Remove(bucketName)
 
 	// Unauthenticated download with READ policy should succeed.
 	code, bodyContent = test("")
@@ -1057,15 +1105,15 @@ func testWebHandlerDownloadZip(obj ObjectLayer, instanceType string, t TestErrHa
 	fileThree := "cccccccccccccc"
 
 	// Create bucket.
-	err = obj.MakeBucketWithLocation(bucket, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucket, "")
 	if err != nil {
 		// failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err)
 	}
 
-	obj.PutObject(bucket, "a/one", mustGetHashReader(t, strings.NewReader(fileOne), int64(len(fileOne)), "", ""), nil)
-	obj.PutObject(bucket, "a/b/two", mustGetHashReader(t, strings.NewReader(fileTwo), int64(len(fileTwo)), "", ""), nil)
-	obj.PutObject(bucket, "a/c/three", mustGetHashReader(t, strings.NewReader(fileThree), int64(len(fileThree)), "", ""), nil)
+	obj.PutObject(context.Background(), bucket, "a/one", mustGetHashReader(t, strings.NewReader(fileOne), int64(len(fileOne)), "", ""), nil)
+	obj.PutObject(context.Background(), bucket, "a/b/two", mustGetHashReader(t, strings.NewReader(fileTwo), int64(len(fileTwo)), "", ""), nil)
+	obj.PutObject(context.Background(), bucket, "a/c/three", mustGetHashReader(t, strings.NewReader(fileThree), int64(len(fileThree)), "", ""), nil)
 
 	test := func(token string) (int, []byte) {
 		rec := httptest.NewRecorder()
@@ -1142,7 +1190,7 @@ func testWebPresignedGetHandler(obj ObjectLayer, instanceType string, t TestErrH
 	objectSize := 1 * humanize.KiByte
 
 	// Create bucket.
-	err = obj.MakeBucketWithLocation(bucketName, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketName, "")
 	if err != nil {
 		// failed to create newbucket, abort.
 		t.Fatalf("%s : %s", instanceType, err)
@@ -1150,7 +1198,7 @@ func testWebPresignedGetHandler(obj ObjectLayer, instanceType string, t TestErrH
 
 	data := bytes.Repeat([]byte("a"), objectSize)
 	metadata := map[string]string{"etag": "c9a34cfc85d982698c6ac89f76071abd"}
-	_, err = obj.PutObject(bucketName, objectName, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), metadata["etag"], ""), metadata)
+	_, err = obj.PutObject(context.Background(), bucketName, objectName, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), metadata["etag"], ""), metadata)
 	if err != nil {
 		t.Fatalf("Was not able to upload an object, %v", err)
 	}
@@ -1243,43 +1291,40 @@ func testWebGetBucketPolicyHandler(obj ObjectLayer, instanceType string, t TestE
 	rec := httptest.NewRecorder()
 
 	bucketName := getRandomBucketName()
-	if err := obj.MakeBucketWithLocation(bucketName, ""); err != nil {
+	if err = obj.MakeBucketWithLocation(context.Background(), bucketName, ""); err != nil {
 		t.Fatal("Unexpected error: ", err)
 	}
 
-	policyVal := policy.BucketAccessPolicy{
-		Version: "2012-10-17",
+	bucketPolicy := &policy.Policy{
+		Version: policy.DefaultVersion,
 		Statements: []policy.Statement{
-			{
-				Actions: set.CreateStringSet("s3:GetBucketLocation", "s3:ListBucket"),
-				Effect:  "Allow",
-				Principal: policy.User{
-					AWS: set.CreateStringSet("*"),
-				},
-				Resources: set.CreateStringSet(bucketARNPrefix + bucketName),
-				Sid:       "",
-			},
-			{
-				Actions: set.CreateStringSet("s3:GetObject"),
-				Effect:  "Allow",
-				Principal: policy.User{
-					AWS: set.CreateStringSet("*"),
-				},
-				Resources: set.CreateStringSet(bucketARNPrefix + bucketName + "/*"),
-				Sid:       "",
-			},
+			policy.NewStatement(
+				policy.Allow,
+				policy.NewPrincipal("*"),
+				policy.NewActionSet(policy.GetBucketLocationAction, policy.ListBucketAction),
+				policy.NewResourceSet(policy.NewResource(bucketName, "")),
+				condition.NewFunctions(),
+			),
+			policy.NewStatement(
+				policy.Allow,
+				policy.NewPrincipal("*"),
+				policy.NewActionSet(policy.GetObjectAction),
+				policy.NewResourceSet(policy.NewResource(bucketName, "*")),
+				condition.NewFunctions(),
+			),
 		},
 	}
-	if err := writeBucketPolicy(bucketName, obj, policyVal); err != nil {
+
+	if err = savePolicyConfig(obj, bucketName, bucketPolicy); err != nil {
 		t.Fatal("Unexpected error: ", err)
 	}
 
 	testCases := []struct {
 		bucketName     string
 		prefix         string
-		expectedResult policy.BucketPolicy
+		expectedResult miniogopolicy.BucketPolicy
 	}{
-		{bucketName, "", policy.BucketPolicyReadOnly},
+		{bucketName, "", miniogopolicy.BucketPolicyReadOnly},
 	}
 
 	for i, testCase := range testCases {
@@ -1321,56 +1366,63 @@ func testWebListAllBucketPoliciesHandler(obj ObjectLayer, instanceType string, t
 	rec := httptest.NewRecorder()
 
 	bucketName := getRandomBucketName()
-	if err := obj.MakeBucketWithLocation(bucketName, ""); err != nil {
+	if err = obj.MakeBucketWithLocation(context.Background(), bucketName, ""); err != nil {
 		t.Fatal("Unexpected error: ", err)
 	}
 
-	stringEqualsConditions := policy.ConditionMap{}
-	stringEqualsConditions["StringEquals"] = make(policy.ConditionKeyMap)
-	stringEqualsConditions["StringEquals"].Add("s3:prefix", set.CreateStringSet("hello"))
+	func1, err := condition.NewStringEqualsFunc(condition.S3Prefix, "hello")
+	if err != nil {
+		t.Fatalf("Unable to create string equals condition function. %v", err)
+	}
 
-	policyVal := policy.BucketAccessPolicy{
-		Version: "2012-10-17",
+	bucketPolicy := &policy.Policy{
+		Version: policy.DefaultVersion,
 		Statements: []policy.Statement{
-			{
-				Actions:   set.CreateStringSet("s3:GetBucketLocation"),
-				Effect:    "Allow",
-				Principal: policy.User{AWS: set.CreateStringSet("*")},
-				Resources: set.CreateStringSet(bucketARNPrefix + bucketName),
-				Sid:       "",
-			},
-			{
-				Actions:    set.CreateStringSet("s3:ListBucket"),
-				Conditions: stringEqualsConditions,
-				Effect:     "Allow",
-				Principal:  policy.User{AWS: set.CreateStringSet("*")},
-				Resources:  set.CreateStringSet(bucketARNPrefix + bucketName),
-				Sid:        "",
-			},
-			{
-				Actions:   set.CreateStringSet("s3:ListBucketMultipartUploads"),
-				Effect:    "Allow",
-				Principal: policy.User{AWS: set.CreateStringSet("*")},
-				Resources: set.CreateStringSet(bucketARNPrefix + bucketName),
-				Sid:       "",
-			},
-			{
-				Actions: set.CreateStringSet("s3:AbortMultipartUpload", "s3:DeleteObject",
-					"s3:GetObject", "s3:ListMultipartUploadParts", "s3:PutObject"),
-				Effect:    "Allow",
-				Principal: policy.User{AWS: set.CreateStringSet("*")},
-				Resources: set.CreateStringSet(bucketARNPrefix + bucketName + "/hello*"),
-				Sid:       "",
-			},
+			policy.NewStatement(
+				policy.Allow,
+				policy.NewPrincipal("*"),
+				policy.NewActionSet(policy.GetBucketLocationAction),
+				policy.NewResourceSet(policy.NewResource(bucketName, "")),
+				condition.NewFunctions(),
+			),
+			policy.NewStatement(
+				policy.Allow,
+				policy.NewPrincipal("*"),
+				policy.NewActionSet(policy.ListBucketAction),
+				policy.NewResourceSet(policy.NewResource(bucketName, "")),
+				condition.NewFunctions(func1),
+			),
+			policy.NewStatement(
+				policy.Allow,
+				policy.NewPrincipal("*"),
+				policy.NewActionSet(policy.ListBucketMultipartUploadsAction),
+				policy.NewResourceSet(policy.NewResource(bucketName, "")),
+				condition.NewFunctions(),
+			),
+			policy.NewStatement(
+				policy.Allow,
+				policy.NewPrincipal("*"),
+				policy.NewActionSet(
+					policy.AbortMultipartUploadAction,
+					policy.DeleteObjectAction,
+					policy.GetObjectAction,
+					policy.ListMultipartUploadPartsAction,
+					policy.PutObjectAction,
+				),
+				policy.NewResourceSet(policy.NewResource(bucketName, "hello*")),
+				condition.NewFunctions(),
+			),
 		},
 	}
-	if err := writeBucketPolicy(bucketName, obj, policyVal); err != nil {
+
+	if err = savePolicyConfig(obj, bucketName, bucketPolicy); err != nil {
 		t.Fatal("Unexpected error: ", err)
 	}
 
 	testCaseResult1 := []BucketAccessPolicy{{
-		Prefix: bucketName + "/hello*",
-		Policy: policy.BucketPolicyReadWrite,
+		Bucket: bucketName,
+		Prefix: "hello",
+		Policy: miniogopolicy.BucketPolicyReadWrite,
 	}}
 	testCases := []struct {
 		bucketName     string
@@ -1419,7 +1471,7 @@ func testWebSetBucketPolicyHandler(obj ObjectLayer, instanceType string, t TestE
 
 	// Create a bucket
 	bucketName := getRandomBucketName()
-	if err = obj.MakeBucketWithLocation(bucketName, ""); err != nil {
+	if err = obj.MakeBucketWithLocation(context.Background(), bucketName, ""); err != nil {
 		t.Fatal("Unexpected error: ", err)
 	}
 
@@ -1442,7 +1494,7 @@ func testWebSetBucketPolicyHandler(obj ObjectLayer, instanceType string, t TestE
 	}
 
 	for i, testCase := range testCases {
-		args := &SetBucketPolicyArgs{BucketName: testCase.bucketName, Prefix: testCase.prefix, Policy: testCase.policy}
+		args := &SetBucketPolicyWebArgs{BucketName: testCase.bucketName, Prefix: testCase.prefix, Policy: testCase.policy}
 		reply := &WebGenericRep{}
 		// Call SetBucketPolicy RPC
 		req, err := newTestWebRPCRequest("Web.SetBucketPolicy", authorization, args)
@@ -1659,7 +1711,7 @@ func TestWebObjectLayerFaultyDisks(t *testing.T) {
 	defer removeRoots(fsDirs)
 
 	bucketName := "mybucket"
-	err = obj.MakeBucketWithLocation(bucketName, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucketName, "")
 	if err != nil {
 		t.Fatal("Cannot make bucket:", err)
 	}
@@ -1701,7 +1753,7 @@ func TestWebObjectLayerFaultyDisks(t *testing.T) {
 		{"ListBuckets", AuthRPCArgs{Version: globalRPCAPIVersion}, ListBucketsRep{}},
 		{"ListObjects", ListObjectsArgs{BucketName: bucketName, Prefix: ""}, ListObjectsRep{}},
 		{"GetBucketPolicy", GetBucketPolicyArgs{BucketName: bucketName, Prefix: ""}, GetBucketPolicyRep{}},
-		{"SetBucketPolicy", SetBucketPolicyArgs{BucketName: bucketName, Prefix: "", Policy: "none"}, WebGenericRep{}},
+		{"SetBucketPolicy", SetBucketPolicyWebArgs{BucketName: bucketName, Prefix: "", Policy: "none"}, WebGenericRep{}},
 	}
 
 	for _, rpcCall := range webRPCs {

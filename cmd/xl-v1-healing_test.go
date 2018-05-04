@@ -18,11 +18,10 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"os"
 	"path/filepath"
 	"testing"
-
-	"github.com/minio/minio/pkg/errors"
 )
 
 // Tests undoes and validates if the undoing completes successfully.
@@ -47,16 +46,15 @@ func TestUndoMakeBucket(t *testing.T) {
 	}
 
 	bucketName := getRandomBucketName()
-	if err = obj.MakeBucketWithLocation(bucketName, ""); err != nil {
+	if err = obj.MakeBucketWithLocation(context.Background(), bucketName, ""); err != nil {
 		t.Fatal(err)
 	}
 	xl := obj.(*xlObjects)
 	undoMakeBucket(xl.storageDisks, bucketName)
 
 	// Validate if bucket was deleted properly.
-	_, err = obj.GetBucketInfo(bucketName)
+	_, err = obj.GetBucketInfo(context.Background(), bucketName)
 	if err != nil {
-		err = errors.Cause(err)
 		switch err.(type) {
 		case BucketNotFound:
 		default:
@@ -91,21 +89,21 @@ func TestHealObjectXL(t *testing.T) {
 	object := "object"
 	data := bytes.Repeat([]byte("a"), 5*1024*1024)
 
-	err = obj.MakeBucketWithLocation(bucket, "")
+	err = obj.MakeBucketWithLocation(context.Background(), bucket, "")
 	if err != nil {
 		t.Fatalf("Failed to make a bucket - %v", err)
 	}
 
 	// Create an object with multiple parts uploaded in decreasing
 	// part number.
-	uploadID, err := obj.NewMultipartUpload(bucket, object, nil)
+	uploadID, err := obj.NewMultipartUpload(context.Background(), bucket, object, nil)
 	if err != nil {
 		t.Fatalf("Failed to create a multipart upload - %v", err)
 	}
 
 	var uploadedParts []CompletePart
 	for _, partID := range []int{2, 1} {
-		pInfo, err1 := obj.PutObjectPart(bucket, object, uploadID, partID, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""))
+		pInfo, err1 := obj.PutObjectPart(context.Background(), bucket, object, uploadID, partID, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""))
 		if err1 != nil {
 			t.Fatalf("Failed to upload a part - %v", err1)
 		}
@@ -115,7 +113,7 @@ func TestHealObjectXL(t *testing.T) {
 		})
 	}
 
-	_, err = obj.CompleteMultipartUpload(bucket, object, uploadID, uploadedParts)
+	_, err = obj.CompleteMultipartUpload(context.Background(), bucket, object, uploadID, uploadedParts)
 	if err != nil {
 		t.Fatalf("Failed to complete multipart upload - %v", err)
 	}
@@ -128,7 +126,7 @@ func TestHealObjectXL(t *testing.T) {
 		t.Fatalf("Failed to delete a file - %v", err)
 	}
 
-	_, err = obj.HealObject(bucket, object, false)
+	_, err = obj.HealObject(context.Background(), bucket, object, false)
 	if err != nil {
 		t.Fatalf("Failed to heal object - %v", err)
 	}
@@ -144,9 +142,9 @@ func TestHealObjectXL(t *testing.T) {
 	}
 
 	// Try healing now, expect to receive errDiskNotFound.
-	_, err = obj.HealObject(bucket, object, false)
+	_, err = obj.HealObject(context.Background(), bucket, object, false)
 	// since majority of xl.jsons are not available, object quorum can't be read properly and error will be errXLReadQuorum
-	if errors.Cause(err) != errXLReadQuorum {
-		t.Errorf("Expected %v but received %v", errDiskNotFound, err)
+	if _, ok := err.(InsufficientReadQuorum); !ok {
+		t.Errorf("Expected %v but received %v", InsufficientWriteQuorum{}, err)
 	}
 }

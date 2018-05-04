@@ -20,6 +20,7 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/minio/minio/pkg/policy"
 )
 
 // Validate all the ListObjects query arguments, returns an APIErrorCode
@@ -53,6 +54,8 @@ func validateListObjectsArgs(prefix, marker, delimiter string, maxKeys int) APIE
 // NOTE: It is recommended that this API to be used for application development.
 // Minio continues to support ListObjectsV1 for supporting legacy tools.
 func (api objectAPIHandlers) ListObjectsV2Handler(w http.ResponseWriter, r *http.Request) {
+	ctx := newContext(r, "ListObjectsV2")
+
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 
@@ -62,7 +65,7 @@ func (api objectAPIHandlers) ListObjectsV2Handler(w http.ResponseWriter, r *http
 		return
 	}
 
-	if s3Error := checkRequestAuthType(r, bucket, "s3:ListBucket", globalServerConfig.GetRegion()); s3Error != ErrNone {
+	if s3Error := checkRequestAuthType(ctx, r, policy.ListBucketAction, bucket, ""); s3Error != ErrNone {
 		writeErrorResponse(w, s3Error, r.URL)
 		return
 	}
@@ -84,11 +87,14 @@ func (api objectAPIHandlers) ListObjectsV2Handler(w http.ResponseWriter, r *http
 		writeErrorResponse(w, s3Error, r.URL)
 		return
 	}
-
+	listObjectsV2 := objectAPI.ListObjectsV2
+	if api.CacheAPI() != nil {
+		listObjectsV2 = api.CacheAPI().ListObjectsV2
+	}
 	// Inititate a list objects operation based on the input params.
 	// On success would return back ListObjectsInfo object to be
 	// marshalled into S3 compatible XML header.
-	listObjectsV2Info, err := objectAPI.ListObjectsV2(bucket, prefix, marker, delimiter, maxKeys, fetchOwner, startAfter)
+	listObjectsV2Info, err := listObjectsV2(ctx, bucket, prefix, marker, delimiter, maxKeys, fetchOwner, startAfter)
 	if err != nil {
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return
@@ -118,6 +124,8 @@ func (api objectAPIHandlers) ListObjectsV2Handler(w http.ResponseWriter, r *http
 // criteria to return a subset of the objects in a bucket.
 //
 func (api objectAPIHandlers) ListObjectsV1Handler(w http.ResponseWriter, r *http.Request) {
+	ctx := newContext(r, "ListObjectsV1")
+
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
 
@@ -127,7 +135,7 @@ func (api objectAPIHandlers) ListObjectsV1Handler(w http.ResponseWriter, r *http
 		return
 	}
 
-	if s3Error := checkRequestAuthType(r, bucket, "s3:ListBucket", globalServerConfig.GetRegion()); s3Error != ErrNone {
+	if s3Error := checkRequestAuthType(ctx, r, policy.ListBucketAction, bucket, ""); s3Error != ErrNone {
 		writeErrorResponse(w, s3Error, r.URL)
 		return
 	}
@@ -145,11 +153,14 @@ func (api objectAPIHandlers) ListObjectsV1Handler(w http.ResponseWriter, r *http
 		writeErrorResponse(w, s3Error, r.URL)
 		return
 	}
-
+	listObjects := objectAPI.ListObjects
+	if api.CacheAPI() != nil {
+		listObjects = api.CacheAPI().ListObjects
+	}
 	// Inititate a list objects operation based on the input params.
 	// On success would return back ListObjectsInfo object to be
 	// marshalled into S3 compatible XML header.
-	listObjectsInfo, err := objectAPI.ListObjects(bucket, prefix, marker, delimiter, maxKeys)
+	listObjectsInfo, err := listObjects(ctx, bucket, prefix, marker, delimiter, maxKeys)
 	if err != nil {
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return

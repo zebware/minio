@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"io/ioutil"
 	"math/rand"
 	"os"
@@ -27,7 +28,6 @@ import (
 	"time"
 
 	humanize "github.com/dustin/go-humanize"
-	"github.com/minio/minio/pkg/errors"
 )
 
 func TestRepeatPutObjectPart(t *testing.T) {
@@ -43,23 +43,23 @@ func TestRepeatPutObjectPart(t *testing.T) {
 	// cleaning up of temporary test directories
 	defer removeRoots(disks)
 
-	err = objLayer.MakeBucketWithLocation("bucket1", "")
+	err = objLayer.MakeBucketWithLocation(context.Background(), "bucket1", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	uploadID, err := objLayer.NewMultipartUpload("bucket1", "mpartObj1", nil)
+	uploadID, err := objLayer.NewMultipartUpload(context.Background(), "bucket1", "mpartObj1", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 	fiveMBBytes := bytes.Repeat([]byte("a"), 5*humanize.MiByte)
 	md5Hex := getMD5Hash(fiveMBBytes)
-	_, err = objLayer.PutObjectPart("bucket1", "mpartObj1", uploadID, 1, mustGetHashReader(t, bytes.NewReader(fiveMBBytes), 5*humanize.MiByte, md5Hex, ""))
+	_, err = objLayer.PutObjectPart(context.Background(), "bucket1", "mpartObj1", uploadID, 1, mustGetHashReader(t, bytes.NewReader(fiveMBBytes), 5*humanize.MiByte, md5Hex, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
 	// PutObjectPart should succeed even if part already exists. ref: https://github.com/minio/minio/issues/1930
-	_, err = objLayer.PutObjectPart("bucket1", "mpartObj1", uploadID, 1, mustGetHashReader(t, bytes.NewReader(fiveMBBytes), 5*humanize.MiByte, md5Hex, ""))
+	_, err = objLayer.PutObjectPart(context.Background(), "bucket1", "mpartObj1", uploadID, 1, mustGetHashReader(t, bytes.NewReader(fiveMBBytes), 5*humanize.MiByte, md5Hex, ""))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -85,19 +85,18 @@ func TestXLDeleteObjectBasic(t *testing.T) {
 	}
 
 	// Make bucket for Test 7 to pass
-	err = xl.MakeBucketWithLocation("bucket", "")
+	err = xl.MakeBucketWithLocation(context.Background(), "bucket", "")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Create object "obj" under bucket "bucket" for Test 7 to pass
-	_, err = xl.PutObject("bucket", "obj", mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
+	_, err = xl.PutObject(context.Background(), "bucket", "obj", mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
 	if err != nil {
 		t.Fatalf("XL Object upload failed: <ERROR> %s", err)
 	}
 	for i, test := range testCases {
-		actualErr := xl.DeleteObject(test.bucket, test.object)
-		actualErr = errors.Cause(actualErr)
+		actualErr := xl.DeleteObject(context.Background(), test.bucket, test.object)
 		if test.expectedErr != nil && actualErr != test.expectedErr {
 			t.Errorf("Test %d: Expected to fail with %s, but failed with %s", i+1, test.expectedErr, actualErr)
 		}
@@ -121,7 +120,7 @@ func TestXLDeleteObjectDiskNotFound(t *testing.T) {
 	xl := obj.(*xlObjects)
 
 	// Create "bucket"
-	err = obj.MakeBucketWithLocation("bucket", "")
+	err = obj.MakeBucketWithLocation(context.Background(), "bucket", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -129,7 +128,7 @@ func TestXLDeleteObjectDiskNotFound(t *testing.T) {
 	bucket := "bucket"
 	object := "object"
 	// Create object "obj" under bucket "bucket".
-	_, err = obj.PutObject(bucket, object, mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
+	_, err = obj.PutObject(context.Background(), bucket, object, mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -138,13 +137,13 @@ func TestXLDeleteObjectDiskNotFound(t *testing.T) {
 	for i := range xl.storageDisks[:7] {
 		xl.storageDisks[i] = newNaughtyDisk(xl.storageDisks[i], nil, errFaultyDisk)
 	}
-	err = obj.DeleteObject(bucket, object)
+	err = obj.DeleteObject(context.Background(), bucket, object)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// Create "obj" under "bucket".
-	_, err = obj.PutObject(bucket, object, mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
+	_, err = obj.PutObject(context.Background(), bucket, object, mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,8 +151,7 @@ func TestXLDeleteObjectDiskNotFound(t *testing.T) {
 	// Remove one more disk to 'lose' quorum, by setting it to nil.
 	xl.storageDisks[7] = nil
 	xl.storageDisks[8] = nil
-	err = obj.DeleteObject(bucket, object)
-	err = errors.Cause(err)
+	err = obj.DeleteObject(context.Background(), bucket, object)
 	// since majority of disks are not available, metaquorum is not achieved and hence errXLReadQuorum error
 	if err != toObjectErr(errXLReadQuorum, bucket, object) {
 		t.Errorf("Expected deleteObject to fail with %v, but failed with %v", toObjectErr(errXLReadQuorum, bucket, object), err)
@@ -172,7 +170,7 @@ func TestGetObjectNoQuorum(t *testing.T) {
 	xl := obj.(*xlObjects)
 
 	// Create "bucket"
-	err = obj.MakeBucketWithLocation("bucket", "")
+	err = obj.MakeBucketWithLocation(context.Background(), "bucket", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -180,7 +178,7 @@ func TestGetObjectNoQuorum(t *testing.T) {
 	bucket := "bucket"
 	object := "object"
 	// Create "object" under "bucket".
-	_, err = obj.PutObject(bucket, object, mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
+	_, err = obj.PutObject(context.Background(), bucket, object, mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,8 +201,7 @@ func TestGetObjectNoQuorum(t *testing.T) {
 			}
 		}
 		// Fetch object from store.
-		err = xl.GetObject(bucket, object, 0, int64(len("abcd")), ioutil.Discard, "")
-		err = errors.Cause(err)
+		err = xl.GetObject(context.Background(), bucket, object, 0, int64(len("abcd")), ioutil.Discard, "")
 		if err != toObjectErr(errXLReadQuorum, bucket, object) {
 			t.Errorf("Expected putObject to fail with %v, but failed with %v", toObjectErr(errXLWriteQuorum, bucket, object), err)
 		}
@@ -223,7 +220,7 @@ func TestPutObjectNoQuorum(t *testing.T) {
 	xl := obj.(*xlObjects)
 
 	// Create "bucket"
-	err = obj.MakeBucketWithLocation("bucket", "")
+	err = obj.MakeBucketWithLocation(context.Background(), "bucket", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +228,7 @@ func TestPutObjectNoQuorum(t *testing.T) {
 	bucket := "bucket"
 	object := "object"
 	// Create "object" under "bucket".
-	_, err = obj.PutObject(bucket, object, mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
+	_, err = obj.PutObject(context.Background(), bucket, object, mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,8 +251,7 @@ func TestPutObjectNoQuorum(t *testing.T) {
 			}
 		}
 		// Upload new content to same object "object"
-		_, err = obj.PutObject(bucket, object, mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
-		err = errors.Cause(err)
+		_, err = obj.PutObject(context.Background(), bucket, object, mustGetHashReader(t, bytes.NewReader([]byte("abcd")), int64(len("abcd")), "", ""), nil)
 		if err != toObjectErr(errXLWriteQuorum, bucket, object) {
 			t.Errorf("Expected putObject to fail with %v, but failed with %v", toObjectErr(errXLWriteQuorum, bucket, object), err)
 		}
@@ -280,7 +276,7 @@ func TestHealing(t *testing.T) {
 	xl := obj.(*xlObjects)
 
 	// Create "bucket"
-	err = obj.MakeBucketWithLocation("bucket", "")
+	err = obj.MakeBucketWithLocation(context.Background(), "bucket", "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -295,13 +291,13 @@ func TestHealing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = obj.PutObject(bucket, object, mustGetHashReader(t, bytes.NewReader(data), length, "", ""), nil)
+	_, err = obj.PutObject(context.Background(), bucket, object, mustGetHashReader(t, bytes.NewReader(data), length, "", ""), nil)
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	disk := xl.storageDisks[0]
-	xlMetaPreHeal, err := readXLMeta(disk, bucket, object)
+	xlMetaPreHeal, err := readXLMeta(context.Background(), disk, bucket, object)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,12 +309,12 @@ func TestHealing(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err = xl.HealObject(bucket, object, false)
+	_, err = xl.HealObject(context.Background(), bucket, object, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	xlMetaPostHeal, err := readXLMeta(disk, bucket, object)
+	xlMetaPostHeal, err := readXLMeta(context.Background(), disk, bucket, object)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -332,17 +328,17 @@ func TestHealing(t *testing.T) {
 	// gone down when an object was replaced by a new object.
 	xlMetaOutDated := xlMetaPreHeal
 	xlMetaOutDated.Stat.ModTime = time.Now()
-	err = writeXLMetadata(disk, bucket, object, xlMetaOutDated)
+	err = writeXLMetadata(context.Background(), disk, bucket, object, xlMetaOutDated)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	_, err = xl.HealObject(bucket, object, false)
+	_, err = xl.HealObject(context.Background(), bucket, object, false)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	xlMetaPostHeal, err = readXLMeta(disk, bucket, object)
+	xlMetaPostHeal, err = readXLMeta(context.Background(), disk, bucket, object)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -359,7 +355,7 @@ func TestHealing(t *testing.T) {
 		t.Fatal(err)
 	}
 	// This would create the bucket.
-	_, err = xl.HealBucket(bucket, false)
+	_, err = xl.HealBucket(context.Background(), bucket, false)
 	if err != nil {
 		t.Fatal(err)
 	}

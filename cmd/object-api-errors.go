@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2015 Minio, Inc.
+ * Minio Cloud Storage, (C) 2015, 2016, 2017, 2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -19,19 +19,12 @@ package cmd
 import (
 	"fmt"
 	"io"
-
-	"github.com/minio/minio/pkg/errors"
 )
 
 // Converts underlying storage error. Convenience function written to
 // handle all cases where we have known types of errors returned by
 // underlying storage layer.
 func toObjectErr(err error, params ...string) error {
-	e, ok := err.(*errors.Error)
-	if ok {
-		err = e.Cause
-	}
-
 	switch err {
 	case errVolumeNotFound:
 		if len(params) >= 1 {
@@ -95,10 +88,6 @@ func toObjectErr(err error, params ...string) error {
 		err = InsufficientWriteQuorum{}
 	case io.ErrUnexpectedEOF, io.ErrShortWrite:
 		err = IncompleteBody{}
-	}
-	if ok {
-		e.Cause = err
-		return e
 	}
 	return err
 }
@@ -170,6 +159,13 @@ type ObjectNotFound GenericError
 
 func (e ObjectNotFound) Error() string {
 	return "Object not found: " + e.Bucket + "#" + e.Object
+}
+
+// ObjectAlreadyExists object already exists.
+type ObjectAlreadyExists GenericError
+
+func (e ObjectAlreadyExists) Error() string {
+	return "Object: " + e.Bucket + "#" + e.Object + " already exists"
 }
 
 // ObjectExistsAsDirectory object already exists as a directory.
@@ -370,13 +366,6 @@ func (e PolicyNesting) Error() string {
 	return "New bucket policy conflicts with an existing policy. Please try again with new prefix."
 }
 
-// PolicyNotFound - policy not found
-type PolicyNotFound GenericError
-
-func (e PolicyNotFound) Error() string {
-	return "Policy not found"
-}
-
 // UnsupportedMetadata - unsupported metadata
 type UnsupportedMetadata struct{}
 
@@ -384,9 +373,15 @@ func (e UnsupportedMetadata) Error() string {
 	return "Unsupported headers in Metadata"
 }
 
+// BackendDown is returned for network errors or if the gateway's backend is down.
+type BackendDown struct{}
+
+func (e BackendDown) Error() string {
+	return "Backend down"
+}
+
 // isErrIncompleteBody - Check if error type is IncompleteBody.
 func isErrIncompleteBody(err error) bool {
-	err = errors.Cause(err)
 	switch err.(type) {
 	case IncompleteBody:
 		return true
@@ -394,19 +389,8 @@ func isErrIncompleteBody(err error) bool {
 	return false
 }
 
-// isErrBucketPolicyNotFound - Check if error type is BucketPolicyNotFound.
-func isErrBucketPolicyNotFound(err error) bool {
-	err = errors.Cause(err)
-	switch err.(type) {
-	case PolicyNotFound:
-		return true
-	}
-	return false
-}
-
 // isErrObjectNotFound - Check if error type is ObjectNotFound.
 func isErrObjectNotFound(err error) bool {
-	err = errors.Cause(err)
 	switch err.(type) {
 	case ObjectNotFound:
 		return true

@@ -43,6 +43,9 @@ or protect the private key additionally with a password:
 ```sh
 openssl ecparam -genkey -name prime256v1 | openssl ec -aes256 -out private.key -passout pass:PASSWORD
 ```
+
+Notice that the NIST curves P-384 and P-521 are not supported yet.
+
 2. **RSA:**
 ```sh
 openssl genrsa -out private.key 2048
@@ -173,6 +176,7 @@ certtool.exe --generate-self-signed --load-privkey private.key --template cert.c
 Minio can be configured to connect to other servers, whether Minio nodes or servers like NATs, Redis. If these servers use certificates that are not registered in one of the known certificates authorities, you can make Minio server trust these CAs by dropping these certificates under Minio config path (`~/.minio/certs/CAs/` on Linux or `C:\Users\<Username>\.minio\certs\CAs` on Windows).
 
 # Explore Further
+* [TLS Configuration for Minio server on Kubernetes](https://github.com/minio/minio/tree/master/docs/tls/kubernetes)
 * [Minio Client Complete Guide](https://docs.minio.io/docs/minio-client-complete-guide)
 * [Generate Let's Encrypt Certificate](https://docs.minio.io/docs/generate-let-s-encypt-certificate-using-concert-for-minio)
 * [Setup Nginx Proxy with Minio Server](https://docs.minio.io/docs/setup-nginx-proxy-with-minio)

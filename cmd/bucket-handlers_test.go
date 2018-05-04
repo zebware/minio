@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2016 Minio, Inc.
+ * Minio Cloud Storage, (C) 2016, 2017, 2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"io/ioutil"
 	"net/http"
@@ -154,7 +155,7 @@ func testGetBucketLocationHandler(obj ObjectLayer, instanceType, bucketName stri
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getReadOnlyBucketStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "TestGetBucketLocationHandler", bucketName, "", instanceType, apiRouter, anonReq, getReadOnlyBucketStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "TestGetBucketLocationHandler", bucketName, "", instanceType, apiRouter, anonReq, getAnonReadOnlyBucketPolicy(bucketName))
 
 	// HTTP request for testing when `objectLayer` is set to `nil`.
 	// There is no need to use an existing bucket and valid input for creating the request
@@ -259,7 +260,7 @@ func testHeadBucketHandler(obj ObjectLayer, instanceType, bucketName string, api
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getReadOnlyBucketStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "TestHeadBucketHandler", bucketName, "", instanceType, apiRouter, anonReq, getReadOnlyBucketStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "TestHeadBucketHandler", bucketName, "", instanceType, apiRouter, anonReq, getAnonReadOnlyBucketPolicy(bucketName))
 
 	// HTTP request for testing when `objectLayer` is set to `nil`.
 	// There is no need to use an existing bucket and valid input for creating the request
@@ -312,7 +313,7 @@ func testListMultipartUploadsHandler(obj ObjectLayer, instanceType, bucketName s
 			maxUploads:         "0",
 			accessKey:          credentials.AccessKey,
 			secretKey:          credentials.SecretKey,
-			expectedRespStatus: http.StatusBadRequest,
+			expectedRespStatus: http.StatusNotFound,
 			shouldPass:         false,
 		},
 		// Test case - 2.
@@ -493,7 +494,7 @@ func testListMultipartUploadsHandler(obj ObjectLayer, instanceType, bucketName s
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyBucketStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "TestListMultipartUploadsHandler", bucketName, "", instanceType, apiRouter, anonReq, getWriteOnlyBucketStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "TestListMultipartUploadsHandler", bucketName, "", instanceType, apiRouter, anonReq, getAnonWriteOnlyBucketPolicy(bucketName))
 
 	// HTTP request for testing when `objectLayer` is set to `nil`.
 	// There is no need to use an existing bucket and valid input for creating the request
@@ -591,7 +592,7 @@ func testListBucketsHandler(obj ObjectLayer, instanceType, bucketName string, ap
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyObjectStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "ListBucketsHandler", "", "", instanceType, apiRouter, anonReq, getWriteOnlyObjectStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "ListBucketsHandler", "", "", instanceType, apiRouter, anonReq, getAnonWriteOnlyBucketPolicy("*"))
 
 	// HTTP request for testing when `objectLayer` is set to `nil`.
 	// There is no need to use an existing bucket and valid input for creating the request
@@ -617,11 +618,6 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 	credentials auth.Credentials, t *testing.T) {
 
 	var err error
-	// register event notifier.
-	err = initEventNotifier(obj)
-	if err != nil {
-		t.Fatal("Notifier initialization failed.")
-	}
 
 	contentBytes := []byte("hello")
 	sha256sum := ""
@@ -629,7 +625,7 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 	for i := 0; i < 10; i++ {
 		objectName := "test-object-" + strconv.Itoa(i)
 		// uploading the object.
-		_, err = obj.PutObject(bucketName, objectName, mustGetHashReader(t, bytes.NewBuffer(contentBytes), int64(len(contentBytes)), "", sha256sum), nil)
+		_, err = obj.PutObject(context.Background(), bucketName, objectName, mustGetHashReader(t, bytes.NewBuffer(contentBytes), int64(len(contentBytes)), "", sha256sum), nil)
 		// if object upload fails stop the test.
 		if err != nil {
 			t.Fatalf("Put Object %d:  Error uploading object: <ERROR> %v", i, err)
@@ -796,32 +792,4 @@ func testAPIDeleteMultipleObjectsHandler(obj ObjectLayer, instanceType, bucketNa
 	// execute the object layer set to `nil` test.
 	// `ExecObjectLayerAPINilTest` manages the operation.
 	ExecObjectLayerAPINilTest(t, nilBucket, nilObject, instanceType, apiRouter, nilReq)
-}
-
-func TestIsBucketActionAllowed(t *testing.T) {
-	ExecObjectLayerAPITest(t, testIsBucketActionAllowedHandler, []string{"BucketLocation"})
-}
-
-func testIsBucketActionAllowedHandler(obj ObjectLayer, instanceType, bucketName string, apiRouter http.Handler,
-	credentials auth.Credentials, t *testing.T) {
-
-	testCases := []struct {
-		// input.
-		action              string
-		bucket              string
-		prefix              string
-		isGlobalPoliciesNil bool
-		// flag indicating whether the test should pass.
-		shouldPass bool
-	}{
-		{"s3:GetBucketLocation", "mybucket", "abc", true, false},
-		{"s3:ListObject", "mybucket", "abc", false, false},
-	}
-	for i, testCase := range testCases {
-		isAllowed := isBucketActionAllowed(testCase.action, testCase.bucket, testCase.prefix, obj)
-		if isAllowed != testCase.shouldPass {
-			t.Errorf("Case %d: Expected the response status to be `%t`, but instead found `%t`", i+1, testCase.shouldPass, isAllowed)
-		}
-
-	}
 }

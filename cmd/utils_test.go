@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io/ioutil"
 	"net/http"
 	"net/url"
@@ -205,12 +206,6 @@ func TestURL2BucketObjectName(t *testing.T) {
 			bucket: "bucket",
 			object: "///object////",
 		},
-		// Test case 8 url is not allocated.
-		{
-			u:      nil,
-			bucket: "",
-			object: "",
-		},
 		// Test case 9 url path is empty.
 		{
 			u:      &url.URL{},
@@ -221,7 +216,7 @@ func TestURL2BucketObjectName(t *testing.T) {
 
 	// Validate all test cases.
 	for i, testCase := range testCases {
-		bucketName, objectName := urlPath2BucketObjectName(testCase.u)
+		bucketName, objectName := urlPath2BucketObjectName(testCase.u.Path)
 		if bucketName != testCase.bucket {
 			t.Errorf("Test %d: failed expected bucket name \"%s\", got \"%s\"", i+1, testCase.bucket, bucketName)
 		}
@@ -236,6 +231,18 @@ func TestStartProfiler(t *testing.T) {
 	if startProfiler("") != nil {
 		t.Fatal("Expected nil, but non-nil value returned for invalid profiler.")
 	}
+}
+
+// checkURL - checks if passed address correspond
+func checkURL(urlStr string) (*url.URL, error) {
+	if urlStr == "" {
+		return nil, errors.New("Address cannot be empty")
+	}
+	u, err := url.Parse(urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("`%s` invalid: %s", urlStr, err.Error())
+	}
+	return u, nil
 }
 
 // TestCheckURL tests valid url.
@@ -431,6 +438,29 @@ func TestCeilFrac(t *testing.T) {
 		ceiling := ceilFrac(testCase.numerator, testCase.denominator)
 		if ceiling != testCase.ceiling {
 			t.Errorf("Case %d: Unexpected result: %d", i, ceiling)
+		}
+	}
+}
+
+// Test if isErrIgnored works correctly.
+func TestIsErrIgnored(t *testing.T) {
+	var errIgnored = fmt.Errorf("ignored error")
+	var testCases = []struct {
+		err     error
+		ignored bool
+	}{
+		{
+			err:     nil,
+			ignored: false,
+		},
+		{
+			err:     errIgnored,
+			ignored: true,
+		},
+	}
+	for i, testCase := range testCases {
+		if ok := IsErrIgnored(testCase.err, errIgnored); ok != testCase.ignored {
+			t.Errorf("Test: %d, Expected %t, got %t", i+1, testCase.ignored, ok)
 		}
 	}
 }

@@ -53,18 +53,6 @@ chmod +x minio
 ./minio server /data
 ```
 
-### Snap
-Install minio using [Snap](https://snapcraft.io)
-```sh
-sudo snap install minio --edge
-```
-
-Start minio using `snap run` command
-```sh
-sudo snap connect minio:mount-observe
-sudo snap run minio server /data
-```
-
 ## Microsoft Windows
 ### Binary Download
 | Platform| Architecture | URL|
@@ -92,10 +80,65 @@ Source installation is only intended for developers and advanced users. If you d
 go get -u github.com/minio/minio
 ```
 
+## Allow port access for Firewalls
+
+By default Minio uses the port 9000 to listen for incoming connections. If your platform blocks the port by default, you may need to enable access to the port.
+
+### iptables
+
+For hosts with iptables enabled (RHEL, CentOS, etc), you can use `iptables` command to enable all traffic coming to specific ports. Use below command to allow
+access to port 9000
+
+```sh
+iptables -A INPUT -p tcp --dport 9000 -j ACCEPT
+service iptables restart
+```
+
+Below command enables all incoming traffic to ports ranging from 9000 to 9010.
+
+```sh
+iptables -A INPUT -p tcp --dport 9000:9010 -j ACCEPT
+service iptables restart
+```
+
+### ufw
+
+For hosts with ufw enabled (Debian based distros), you can use `ufw` command to allow traffic to specific ports. Use below command to allow access to port 9000
+
+```sh
+ufw allow 9000
+```
+
+Below command enables all incoming traffic to ports ranging from 9000 to 9010.
+
+```sh
+ufw allow 9000:9010/tcp
+```
+
+### firewall-cmd
+
+For hosts with firewall-cmd enabled (CentOS), you can use `firewall-cmd` command to allow traffic to specific ports. Use below commands to allow access to port 9000
+
+```sh
+firewall-cmd --get-active-zones
+```
+
+This command gets the active zone(s). Now, apply port rules to the relevant zones returned above. For example if the zone is `public`, use
+
+```sh
+firewall-cmd --zone=public --add-port=9000/tcp --permanent
+```
+
+Note that `permanent` makes sure the rules are persistent across firewall start, restart or reload. Finally reload the firewall for changes to take effect.
+
+```sh
+firewall-cmd --reload
+```
+
 ## Test using Minio Browser
 Minio Server comes with an embedded web based object browser. Point your web browser to http://127.0.0.1:9000 ensure your server has started successfully.
 
-![Screenshot](https://github.com/minio/minio/blob/master/docs/screenshots/minio-browser.jpg?raw=true)
+![Screenshot](https://github.com/minio/minio/blob/master/docs/screenshots/minio-browser.png?raw=true)
 
 ## Test using Minio Client `mc`
 `mc` provides a modern alternative to UNIX commands like ls, cat, cp, mirror, diff etc. It supports filesystems and Amazon S3 compatible cloud storage services. Follow the Minio Client [Quickstart Guide](https://docs.minio.io/docs/minio-client-quickstart-guide) for further instructions.

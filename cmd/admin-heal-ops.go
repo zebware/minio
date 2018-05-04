@@ -17,12 +17,14 @@
 package cmd
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/madmin"
 )
 
@@ -215,12 +217,12 @@ func (ahs *allHealState) LaunchNewHealSequence(h *healSequence) (
 	}()
 
 	b, err := json.Marshal(madmin.HealStartSuccess{
-		h.clientToken,
-		h.clientAddress,
-		h.startTime,
+		ClientToken:   h.clientToken,
+		ClientAddress: h.clientAddress,
+		StartTime:     h.startTime,
 	})
 	if err != nil {
-		errorIf(err, "Failed to marshal heal result into json.")
+		logger.LogIf(context.Background(), err)
 		return nil, ErrInternalError, ""
 	}
 	return b, ErrNone, ""
@@ -268,7 +270,7 @@ func (ahs *allHealState) PopHealStatusJSON(path string,
 
 	jbytes, err := json.Marshal(h.currentStatus)
 	if err != nil {
-		errorIf(err, "Failed to marshal heal result into json.")
+		logger.LogIf(context.Background(), err)
 		return nil, ErrInternalError
 	}
 
@@ -309,12 +311,19 @@ type healSequence struct {
 
 	// the last result index sent to client
 	lastSentResultIndex int64
+
+	// Holds the request-info for logging
+	ctx context.Context
 }
 
 // NewHealSequence - creates healSettings, assumes bucket and
 // objPrefix are already validated.
 func newHealSequence(bucket, objPrefix, clientAddr string,
 	numDisks int, hs madmin.HealOpts, forceStart bool) *healSequence {
+
+	reqInfo := &logger.ReqInfo{RemoteHost: clientAddr, API: "Heal", BucketName: bucket}
+	reqInfo.AppendTags("prefix", objPrefix)
+	ctx := logger.SetReqInfo(context.Background(), reqInfo)
 
 	return &healSequence{
 		bucket:        bucket,
@@ -333,6 +342,7 @@ func newHealSequence(bucket, objPrefix, clientAddr string,
 		},
 		traverseAndHealDoneCh: make(chan error),
 		stopSignalCh:          make(chan struct{}),
+		ctx:                   ctx,
 	}
 }
 
@@ -528,12 +538,18 @@ func (h *healSequence) healDiskFormat() error {
 		return errServerNotInitialized
 	}
 
-	res, err := objectAPI.HealFormat(h.settings.DryRun)
-	if err != nil {
+	res, err := objectAPI.HealFormat(h.ctx, h.settings.DryRun)
+	// return any error, ignore error returned when disks have
+	// already healed.
+	if err != nil && err != errNoHealRequired {
 		return errFnHealFromAPIErr(err)
 	}
 
-	peersReInitFormat(globalAdminPeers, h.settings.DryRun)
+	// Healing succeeded notify the peers to reload format and re-initialize disks.
+	// We will not notify peers only if healing succeeded.
+	if err == nil {
+		peersReInitFormat(globalAdminPeers, h.settings.DryRun)
+	}
 
 	// Push format heal result
 	return h.pushHealResultItem(res)
@@ -552,7 +568,7 @@ func (h *healSequence) healBuckets() error {
 		return errServerNotInitialized
 	}
 
-	buckets, err := objectAPI.ListBucketsHeal()
+	buckets, err := objectAPI.ListBucketsHeal(h.ctx)
 	if err != nil {
 		return errFnHealFromAPIErr(err)
 	}
@@ -578,20 +594,13 @@ func (h *healSequence) healBucket(bucket string) error {
 		return errServerNotInitialized
 	}
 
-	bucketLock := globalNSMutex.NewNSLock(bucket, "")
-	if err := bucketLock.GetLock(globalHealingTimeout); err != nil {
-		return err
-	}
-
-	results, err := objectAPI.HealBucket(bucket, h.settings.DryRun)
+	results, err := objectAPI.HealBucket(h.ctx, bucket, h.settings.DryRun)
 	// push any available results before checking for error
 	for _, result := range results {
 		if perr := h.pushHealResultItem(result); perr != nil {
-			bucketLock.Unlock()
 			return perr
 		}
 	}
-	bucketLock.Unlock()
 	// handle heal-bucket error
 	if err != nil {
 		return err
@@ -601,7 +610,7 @@ func (h *healSequence) healBucket(bucket string) error {
 		if h.objPrefix != "" {
 			// Check if an object named as the objPrefix exists,
 			// and if so heal it.
-			_, err = objectAPI.GetObjectInfo(bucket, h.objPrefix)
+			_, err = objectAPI.GetObjectInfo(h.ctx, bucket, h.objPrefix)
 			if err == nil {
 				err = h.healObject(bucket, h.objPrefix)
 				if err != nil {
@@ -616,7 +625,7 @@ func (h *healSequence) healBucket(bucket string) error {
 	marker := ""
 	isTruncated := true
 	for isTruncated {
-		objectInfos, err := objectAPI.ListObjectsHeal(bucket,
+		objectInfos, err := objectAPI.ListObjectsHeal(h.ctx, bucket,
 			h.objPrefix, marker, "", 1000)
 		if err != nil {
 			return errFnHealFromAPIErr(err)
@@ -646,7 +655,7 @@ func (h *healSequence) healObject(bucket, object string) error {
 		return errServerNotInitialized
 	}
 
-	hri, err := objectAPI.HealObject(bucket, object, h.settings.DryRun)
+	hri, err := objectAPI.HealObject(h.ctx, bucket, object, h.settings.DryRun)
 	if err != nil {
 		hri.Detail = err.Error()
 	}

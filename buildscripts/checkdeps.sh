@@ -21,7 +21,7 @@ _init() {
 
     ## Minimum required versions for build dependencies
     GIT_VERSION="1.0"
-    GO_VERSION="1.9.4"
+    GO_VERSION="1.10.1"
     OSX_VERSION="10.8"
     KNAME=$(uname -s)
     ARCH=$(uname -m)
@@ -128,12 +128,6 @@ assert_check_golang_env() {
         echo "Go runtime version '${installed_go_version}' is unsupported. Minimum supported version: ${GO_VERSION} to compile."
         exit 1
     fi
-
-    if [ -z "${GOPATH}" ]; then
-        echo "GOPATH environment variable missing, please refer to Go installation document at https://docs.minio.io/docs/how-to-install-golang"
-        exit 1
-    fi
-
 }
 
 assert_check_deps() {

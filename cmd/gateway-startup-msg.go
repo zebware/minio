@@ -17,14 +17,21 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"strings"
+
+	"github.com/minio/minio/cmd/logger"
 )
 
 // Prints the formatted startup message.
 func printGatewayStartupMessage(apiEndPoints []string, backendType string) {
 	strippedAPIEndpoints := stripStandardPorts(apiEndPoints)
-
+	// If cache layer is enabled, print cache capacity.
+	cacheObjectAPI := newCacheObjectsFn()
+	if cacheObjectAPI != nil {
+		printCacheStorageInfo(cacheObjectAPI.StorageInfo(context.Background()))
+	}
 	// Prints credential.
 	printGatewayCommonMsg(strippedAPIEndpoints)
 
@@ -49,12 +56,12 @@ func printGatewayCommonMsg(apiEndpoints []string) {
 
 	apiEndpointStr := strings.Join(apiEndpoints, "  ")
 	// Colorize the message and print.
-	log.Println(colorBlue("\nEndpoint: ") + colorBold(fmt.Sprintf(getFormatStr(len(apiEndpointStr), 1), apiEndpointStr)))
-	log.Println(colorBlue("AccessKey: ") + colorBold(fmt.Sprintf("%s ", cred.AccessKey)))
-	log.Println(colorBlue("SecretKey: ") + colorBold(fmt.Sprintf("%s ", cred.SecretKey)))
+	logger.StartupMessage(colorBlue("\nEndpoint: ") + colorBold(fmt.Sprintf(getFormatStr(len(apiEndpointStr), 1), apiEndpointStr)))
+	logger.StartupMessage(colorBlue("AccessKey: ") + colorBold(fmt.Sprintf("%s ", cred.AccessKey)))
+	logger.StartupMessage(colorBlue("SecretKey: ") + colorBold(fmt.Sprintf("%s ", cred.SecretKey)))
 
 	if globalIsBrowserEnabled {
-		log.Println(colorBlue("\nBrowser Access:"))
-		log.Println(fmt.Sprintf(getFormatStr(len(apiEndpointStr), 3), apiEndpointStr))
+		logger.StartupMessage(colorBlue("\nBrowser Access:"))
+		logger.StartupMessage(fmt.Sprintf(getFormatStr(len(apiEndpointStr), 3), apiEndpointStr))
 	}
 }

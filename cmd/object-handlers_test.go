@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2016 Minio, Inc.
+ * Minio Cloud Storage, (C) 2016, 2017, 2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/xml"
 	"fmt"
 	"io"
@@ -76,7 +77,7 @@ func testAPIHeadObjectHandler(obj ObjectLayer, instanceType, bucketName string, 
 	// iterate through the above set of inputs and upload the object.
 	for i, input := range putObjectInputs {
 		// uploading the object.
-		_, err := obj.PutObject(input.bucketName, input.objectName, mustGetHashReader(t, bytes.NewBuffer(input.textData), input.contentLength, input.metaData[""], ""), input.metaData)
+		_, err := obj.PutObject(context.Background(), input.bucketName, input.objectName, mustGetHashReader(t, bytes.NewBuffer(input.textData), input.contentLength, input.metaData[""], ""), input.metaData)
 		// if object upload fails stop the test.
 		if err != nil {
 			t.Fatalf("Put Object case %d:  Error uploading object: <ERROR> %v", i+1, err)
@@ -171,7 +172,7 @@ func testAPIHeadObjectHandler(obj ObjectLayer, instanceType, bucketName string, 
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyObjectStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIHeadObjectHandler", bucketName, objectName, instanceType, apiRouter, anonReq, getReadOnlyObjectStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIHeadObjectHandler", bucketName, objectName, instanceType, apiRouter, anonReq, getAnonReadOnlyObjectPolicy(bucketName, objectName))
 
 	// HTTP request for testing when `objectLayer` is set to `nil`.
 	// There is no need to use an existing bucket and valid input for creating the request
@@ -223,7 +224,7 @@ func testAPIGetObjectHandler(obj ObjectLayer, instanceType, bucketName string, a
 	// iterate through the above set of inputs and upload the object.
 	for i, input := range putObjectInputs {
 		// uploading the object.
-		_, err := obj.PutObject(input.bucketName, input.objectName, mustGetHashReader(t, bytes.NewBuffer(input.textData), input.contentLength, input.metaData[""], ""), input.metaData)
+		_, err := obj.PutObject(context.Background(), input.bucketName, input.objectName, mustGetHashReader(t, bytes.NewBuffer(input.textData), input.contentLength, input.metaData[""], ""), input.metaData)
 		// if object upload fails stop the test.
 		if err != nil {
 			t.Fatalf("Put Object case %d:  Error uploading object: <ERROR> %v", i+1, err)
@@ -444,7 +445,7 @@ func testAPIGetObjectHandler(obj ObjectLayer, instanceType, bucketName string, a
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyObjectStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIGetObjectHandler", bucketName, objectName, instanceType, apiRouter, anonReq, getReadOnlyObjectStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIGetObjectHandler", bucketName, objectName, instanceType, apiRouter, anonReq, getAnonReadOnlyObjectPolicy(bucketName, objectName))
 
 	// HTTP request for testing when `objectLayer` is set to `nil`.
 	// There is no need to use an existing bucket and valid input for creating the request
@@ -478,11 +479,8 @@ func testAPIPutObjectStreamSigV4Handler(obj ObjectLayer, instanceType, bucketNam
 	bytesData := bytes.Repeat([]byte{'a'}, bytesDataLen)
 	oneKData := bytes.Repeat([]byte("a"), 1*humanize.KiByte)
 
-	err := initEventNotifier(obj)
-	if err != nil {
-		t.Fatalf("[%s] - Failed to initialize event notifiers <ERROR> %v", instanceType, err)
+	var err error
 
-	}
 	type streamFault int
 	const (
 		None streamFault = iota
@@ -754,7 +752,7 @@ func testAPIPutObjectStreamSigV4Handler(obj ObjectLayer, instanceType, bucketNam
 				t.Errorf("Test %d: %s: Object content differs from expected value.: %s", i+1, instanceType, string(actualContent))
 				continue
 			}
-			objInfo, err := obj.GetObjectInfo(testCase.bucketName, testCase.objectName)
+			objInfo, err := obj.GetObjectInfo(context.Background(), testCase.bucketName, testCase.objectName)
 			if err != nil {
 				t.Fatalf("Test %d: %s: Failed to fetch the copied object: <ERROR> %s", i+1, instanceType, err)
 			}
@@ -766,7 +764,7 @@ func testAPIPutObjectStreamSigV4Handler(obj ObjectLayer, instanceType, bucketNam
 				t.Fatalf("Test %d: %s: ContentEncoding is set to \"%s\" which is unexpected, expected \"%s\"", i+1, instanceType, objInfo.ContentEncoding, expectedContentEncoding)
 			}
 			buffer := new(bytes.Buffer)
-			err = obj.GetObject(testCase.bucketName, testCase.objectName, 0, int64(testCase.dataLen), buffer, objInfo.ETag)
+			err = obj.GetObject(context.Background(), testCase.bucketName, testCase.objectName, 0, int64(testCase.dataLen), buffer, objInfo.ETag)
 			if err != nil {
 				t.Fatalf("Test %d: %s: Failed to fetch the copied object: <ERROR> %s", i+1, instanceType, err)
 			}
@@ -787,12 +785,7 @@ func TestAPIPutObjectHandler(t *testing.T) {
 func testAPIPutObjectHandler(obj ObjectLayer, instanceType, bucketName string, apiRouter http.Handler,
 	credentials auth.Credentials, t *testing.T) {
 
-	// register event notifier.
-	err := initEventNotifier(obj)
-
-	if err != nil {
-		t.Fatal("Notifier initialization failed.")
-	}
+	var err error
 	objectName := "test-object"
 	// byte data for PutObject.
 	bytesData := generateBytesData(6 * humanize.KiByte)
@@ -943,7 +936,7 @@ func testAPIPutObjectHandler(obj ObjectLayer, instanceType, bucketName string, a
 			buffer := new(bytes.Buffer)
 
 			// Fetch the object to check whether the content is same as the one uploaded via PutObject.
-			err = obj.GetObject(testCase.bucketName, testCase.objectName, 0, int64(len(bytesData)), buffer, "")
+			err = obj.GetObject(context.Background(), testCase.bucketName, testCase.objectName, 0, int64(len(bytesData)), buffer, "")
 			if err != nil {
 				t.Fatalf("Test %d: %s: Failed to fetch the copied object: <ERROR> %s", i+1, instanceType, err)
 			}
@@ -986,7 +979,7 @@ func testAPIPutObjectHandler(obj ObjectLayer, instanceType, bucketName string, a
 		if testCase.expectedRespStatus == http.StatusOK {
 			buffer := new(bytes.Buffer)
 			// Fetch the object to check whether the content is same as the one uploaded via PutObject.
-			err = obj.GetObject(testCase.bucketName, testCase.objectName, 0, int64(len(bytesData)), buffer, "")
+			err = obj.GetObject(context.Background(), testCase.bucketName, testCase.objectName, 0, int64(len(bytesData)), buffer, "")
 			if err != nil {
 				t.Fatalf("Test %d: %s: Failed to fetch the copied object: <ERROR> %s", i+1, instanceType, err)
 			}
@@ -1008,7 +1001,7 @@ func testAPIPutObjectHandler(obj ObjectLayer, instanceType, bucketName string, a
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyObjectStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIPutObjectHandler", bucketName, objectName, instanceType, apiRouter, anonReq, getWriteOnlyObjectStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIPutObjectHandler", bucketName, objectName, instanceType, apiRouter, anonReq, getAnonWriteOnlyObjectPolicy(bucketName, objectName))
 
 	// HTTP request to test the case of `objectLayer` being set to `nil`.
 	// There is no need to use an existing bucket or valid input for creating the request,
@@ -1041,11 +1034,7 @@ func testAPICopyObjectPartHandlerSanity(obj ObjectLayer, instanceType, bucketNam
 	credentials auth.Credentials, t *testing.T) {
 
 	objectName := "test-object"
-	// register event notifier.
-	err := initEventNotifier(obj)
-	if err != nil {
-		t.Fatalf("Initializing event notifiers failed")
-	}
+	var err error
 
 	// set of byte data for PutObject.
 	// object has to be created before running tests for Copy Object.
@@ -1070,7 +1059,7 @@ func testAPICopyObjectPartHandlerSanity(obj ObjectLayer, instanceType, bucketNam
 	// iterate through the above set of inputs and upload the object.
 	for i, input := range putObjectInputs {
 		// uploading the object.
-		_, err = obj.PutObject(input.bucketName, input.objectName,
+		_, err = obj.PutObject(context.Background(), input.bucketName, input.objectName,
 			mustGetHashReader(t, bytes.NewBuffer(input.textData), input.contentLength, input.metaData[""], ""), input.metaData)
 		// if object upload fails stop the test.
 		if err != nil {
@@ -1084,7 +1073,7 @@ func testAPICopyObjectPartHandlerSanity(obj ObjectLayer, instanceType, bucketNam
 	// PutObjectPart API HTTP Handler has to be tested in isolation,
 	// that is without any other handler being registered,
 	// That's why NewMultipartUpload is initiated using ObjectLayer.
-	uploadID, err := obj.NewMultipartUpload(bucketName, testObject, nil)
+	uploadID, err := obj.NewMultipartUpload(context.Background(), bucketName, testObject, nil)
 	if err != nil {
 		// Failed to create NewMultipartUpload, abort.
 		t.Fatalf("Minio %s : <ERROR>  %s", instanceType, err)
@@ -1129,7 +1118,7 @@ func testAPICopyObjectPartHandlerSanity(obj ObjectLayer, instanceType, bucketNam
 		})
 	}
 
-	result, err := obj.CompleteMultipartUpload(bucketName, testObject, uploadID, parts)
+	result, err := obj.CompleteMultipartUpload(context.Background(), bucketName, testObject, uploadID, parts)
 	if err != nil {
 		t.Fatalf("Test: %s complete multipart upload failed: <ERROR> %v", instanceType, err)
 	}
@@ -1138,7 +1127,7 @@ func testAPICopyObjectPartHandlerSanity(obj ObjectLayer, instanceType, bucketNam
 	}
 
 	var buf bytes.Buffer
-	if err = obj.GetObject(bucketName, testObject, 0, int64(len(bytesData[0].byteData)), &buf, ""); err != nil {
+	if err = obj.GetObject(context.Background(), bucketName, testObject, 0, int64(len(bytesData[0].byteData)), &buf, ""); err != nil {
 		t.Fatalf("Test: %s reading completed file failed: <ERROR> %v", instanceType, err)
 	}
 	if !bytes.Equal(buf.Bytes(), bytesData[0].byteData) {
@@ -1156,11 +1145,7 @@ func testAPICopyObjectPartHandler(obj ObjectLayer, instanceType, bucketName stri
 	credentials auth.Credentials, t *testing.T) {
 
 	objectName := "test-object"
-	// register event notifier.
-	err := initEventNotifier(obj)
-	if err != nil {
-		t.Fatalf("Initializing event notifiers failed")
-	}
+	var err error
 
 	// set of byte data for PutObject.
 	// object has to be created before running tests for Copy Object.
@@ -1185,7 +1170,7 @@ func testAPICopyObjectPartHandler(obj ObjectLayer, instanceType, bucketName stri
 	// iterate through the above set of inputs and upload the object.
 	for i, input := range putObjectInputs {
 		// uploading the object.
-		_, err = obj.PutObject(input.bucketName, input.objectName, mustGetHashReader(t, bytes.NewBuffer(input.textData), input.contentLength, input.metaData[""], ""), input.metaData)
+		_, err = obj.PutObject(context.Background(), input.bucketName, input.objectName, mustGetHashReader(t, bytes.NewBuffer(input.textData), input.contentLength, input.metaData[""], ""), input.metaData)
 		// if object upload fails stop the test.
 		if err != nil {
 			t.Fatalf("Put Object case %d:  Error uploading object: <ERROR> %v", i+1, err)
@@ -1198,7 +1183,7 @@ func testAPICopyObjectPartHandler(obj ObjectLayer, instanceType, bucketName stri
 	// PutObjectPart API HTTP Handler has to be tested in isolation,
 	// that is without any other handler being registered,
 	// That's why NewMultipartUpload is initiated using ObjectLayer.
-	uploadID, err := obj.NewMultipartUpload(bucketName, testObject, nil)
+	uploadID, err := obj.NewMultipartUpload(context.Background(), bucketName, testObject, nil)
 	if err != nil {
 		// Failed to create NewMultipartUpload, abort.
 		t.Fatalf("Minio %s : <ERROR>  %s", instanceType, err)
@@ -1414,7 +1399,7 @@ func testAPICopyObjectPartHandler(obj ObjectLayer, instanceType, bucketName stri
 			// See if the new part has been uploaded.
 			// testing whether the copy was successful.
 			var results ListPartsInfo
-			results, err = obj.ListObjectParts(testCase.bucketName, testObject, testCase.uploadID, 0, 1)
+			results, err = obj.ListObjectParts(context.Background(), testCase.bucketName, testObject, testCase.uploadID, 0, 1)
 			if err != nil {
 				t.Fatalf("Test %d: %s: Failed to look for copied object part: <ERROR> %s", i+1, instanceType, err)
 			}
@@ -1488,11 +1473,7 @@ func testAPICopyObjectHandler(obj ObjectLayer, instanceType, bucketName string, 
 	objectName := "test-object"
 	// object used for anonymous HTTP request test.
 	anonObject := "anon-object"
-	// register event notifier.
-	err := initEventNotifier(obj)
-	if err != nil {
-		t.Fatalf("Initializing event notifiers failed")
-	}
+	var err error
 
 	// set of byte data for PutObject.
 	// object has to be created before running tests for Copy Object.
@@ -1526,7 +1507,7 @@ func testAPICopyObjectHandler(obj ObjectLayer, instanceType, bucketName string, 
 	// iterate through the above set of inputs and upload the object.
 	for i, input := range putObjectInputs {
 		// uploading the object.
-		_, err = obj.PutObject(input.bucketName, input.objectName, mustGetHashReader(t, bytes.NewBuffer(input.textData), input.contentLength, input.metaData[""], ""), input.metaData)
+		_, err = obj.PutObject(context.Background(), input.bucketName, input.objectName, mustGetHashReader(t, bytes.NewBuffer(input.textData), input.contentLength, input.metaData[""], ""), input.metaData)
 		// if object upload fails stop the test.
 		if err != nil {
 			t.Fatalf("Put Object case %d:  Error uploading object: <ERROR> %v", i+1, err)
@@ -1795,7 +1776,7 @@ func testAPICopyObjectHandler(obj ObjectLayer, instanceType, bucketName string, 
 		if rec.Code == http.StatusOK {
 			// See if the new object is formed.
 			// testing whether the copy was successful.
-			err = obj.GetObject(testCase.bucketName, testCase.newObjectName, 0, int64(len(bytesData[0].byteData)), buffers[0], "")
+			err = obj.GetObject(context.Background(), testCase.bucketName, testCase.newObjectName, 0, int64(len(bytesData[0].byteData)), buffers[0], "")
 			if err != nil {
 				t.Fatalf("Test %d: %s: Failed to fetch the copied object: <ERROR> %s", i+1, instanceType, err)
 			}
@@ -1866,7 +1847,7 @@ func testAPICopyObjectHandler(obj ObjectLayer, instanceType, bucketName string, 
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyObjectStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "TestAPICopyObjectHandler", bucketName, newCopyAnonObject, instanceType, apiRouter, anonReq, getWriteOnlyObjectStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "TestAPICopyObjectHandler", bucketName, newCopyAnonObject, instanceType, apiRouter, anonReq, getAnonWriteOnlyObjectPolicy(bucketName, newCopyAnonObject))
 
 	// HTTP request to test the case of `objectLayer` being set to `nil`.
 	// There is no need to use an existing bucket or valid input for creating the request,
@@ -1929,7 +1910,7 @@ func testAPINewMultipartHandler(obj ObjectLayer, instanceType, bucketName string
 		t.Fatalf("Error decoding the recorded response Body")
 	}
 	// verify the uploadID my making an attempt to list parts.
-	_, err = obj.ListObjectParts(bucketName, objectName, multipartResponse.UploadID, 0, 1)
+	_, err = obj.ListObjectParts(context.Background(), bucketName, objectName, multipartResponse.UploadID, 0, 1)
 	if err != nil {
 		t.Fatalf("Invalid UploadID: <ERROR> %s", err)
 	}
@@ -1981,7 +1962,7 @@ func testAPINewMultipartHandler(obj ObjectLayer, instanceType, bucketName string
 		t.Fatalf("Error decoding the recorded response Body")
 	}
 	// verify the uploadID my making an attempt to list parts.
-	_, err = obj.ListObjectParts(bucketName, objectName, multipartResponse.UploadID, 0, 1)
+	_, err = obj.ListObjectParts(context.Background(), bucketName, objectName, multipartResponse.UploadID, 0, 1)
 	if err != nil {
 		t.Fatalf("Invalid UploadID: <ERROR> %s", err)
 	}
@@ -2017,7 +1998,7 @@ func testAPINewMultipartHandler(obj ObjectLayer, instanceType, bucketName string
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyObjectStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "TestAPINewMultipartHandler", bucketName, objectName, instanceType, apiRouter, anonReq, getWriteOnlyObjectStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "TestAPINewMultipartHandler", bucketName, objectName, instanceType, apiRouter, anonReq, getAnonWriteOnlyObjectPolicy(bucketName, objectName))
 
 	// HTTP request to test the case of `objectLayer` being set to `nil`.
 	// There is no need to use an existing bucket or valid input for creating the request,
@@ -2093,7 +2074,7 @@ func testAPINewMultipartHandlerParallel(obj ObjectLayer, instanceType, bucketNam
 	wg.Wait()
 	// Validate the upload ID by an attempt to list parts using it.
 	for _, uploadID := range testUploads.uploads {
-		_, err := obj.ListObjectParts(bucketName, objectName, uploadID, 0, 1)
+		_, err := obj.ListObjectParts(context.Background(), bucketName, objectName, uploadID, 0, 1)
 		if err != nil {
 			t.Fatalf("Invalid UploadID: <ERROR> %s", err)
 		}
@@ -2110,12 +2091,6 @@ func testAPICompleteMultipartHandler(obj ObjectLayer, instanceType, bucketName s
 	credentials auth.Credentials, t *testing.T) {
 
 	var err error
-	// register event notifier.
-	err = initEventNotifier(obj)
-
-	if err != nil {
-		t.Fatal("Notifier initialization failed.")
-	}
 
 	// object used for the test.
 	objectName := "test-object-new-multipart"
@@ -2127,7 +2102,7 @@ func testAPICompleteMultipartHandler(obj ObjectLayer, instanceType, bucketName s
 
 	for i := 0; i < 2; i++ {
 		// initiate new multipart uploadID.
-		uploadID, err = obj.NewMultipartUpload(bucketName, objectName, nil)
+		uploadID, err = obj.NewMultipartUpload(context.Background(), bucketName, objectName, nil)
 		if err != nil {
 			// Failed to create NewMultipartUpload, abort.
 			t.Fatalf("Minio %s : <ERROR>  %s", instanceType, err)
@@ -2168,7 +2143,7 @@ func testAPICompleteMultipartHandler(obj ObjectLayer, instanceType, bucketName s
 	}
 	// Iterating over creatPartCases to generate multipart chunks.
 	for _, part := range parts {
-		_, err = obj.PutObjectPart(part.bucketName, part.objName, part.uploadID, part.PartID,
+		_, err = obj.PutObjectPart(context.Background(), part.bucketName, part.objName, part.uploadID, part.PartID,
 			mustGetHashReader(t, bytes.NewBufferString(part.inputReaderData), part.intputDataSize, part.inputMd5, ""))
 		if err != nil {
 			t.Fatalf("%s : %s", instanceType, err)
@@ -2231,7 +2206,7 @@ func testAPICompleteMultipartHandler(obj ObjectLayer, instanceType, bucketName s
 	}
 
 	// on successful complete multipart operation the s3MD5 for the parts uploaded will be returned.
-	s3MD5, err := getCompleteMultipartMD5(inputParts[3].parts)
+	s3MD5, err := getCompleteMultipartMD5(context.Background(), inputParts[3].parts)
 	if err != nil {
 		t.Fatalf("Obtaining S3MD5 failed")
 	}
@@ -2434,7 +2409,7 @@ func testAPICompleteMultipartHandler(obj ObjectLayer, instanceType, bucketName s
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyObjectStatement` so that the
 	// unsigned request goes through and its validated again.
 	ExecObjectLayerAPIAnonTest(t, obj, "TestAPICompleteMultipartHandler", bucketName, objectName, instanceType,
-		apiRouter, anonReq, getWriteOnlyObjectStatement)
+		apiRouter, anonReq, getAnonWriteOnlyObjectPolicy(bucketName, objectName))
 
 	// HTTP request to test the case of `objectLayer` being set to `nil`.
 	// There is no need to use an existing bucket or valid input for creating the request,
@@ -2465,12 +2440,6 @@ func testAPIAbortMultipartHandler(obj ObjectLayer, instanceType, bucketName stri
 	credentials auth.Credentials, t *testing.T) {
 
 	var err error
-	// register event notifier.
-	err = initEventNotifier(obj)
-
-	if err != nil {
-		t.Fatal("Notifier initialization failed.")
-	}
 
 	// object used for the test.
 	objectName := "test-object-new-multipart"
@@ -2482,7 +2451,7 @@ func testAPIAbortMultipartHandler(obj ObjectLayer, instanceType, bucketName stri
 
 	for i := 0; i < 2; i++ {
 		// initiate new multipart uploadID.
-		uploadID, err = obj.NewMultipartUpload(bucketName, objectName, nil)
+		uploadID, err = obj.NewMultipartUpload(context.Background(), bucketName, objectName, nil)
 		if err != nil {
 			// Failed to create NewMultipartUpload, abort.
 			t.Fatalf("Minio %s : <ERROR>  %s", instanceType, err)
@@ -2523,7 +2492,7 @@ func testAPIAbortMultipartHandler(obj ObjectLayer, instanceType, bucketName stri
 	}
 	// Iterating over createPartCases to generate multipart chunks.
 	for _, part := range parts {
-		_, err = obj.PutObjectPart(part.bucketName, part.objName, part.uploadID, part.PartID,
+		_, err = obj.PutObjectPart(context.Background(), part.bucketName, part.objName, part.uploadID, part.PartID,
 			mustGetHashReader(t, bytes.NewBufferString(part.inputReaderData), part.intputDataSize, part.inputMd5, ""))
 		if err != nil {
 			t.Fatalf("%s : %s", instanceType, err)
@@ -2603,7 +2572,7 @@ func testAPIAbortMultipartHandler(obj ObjectLayer, instanceType, bucketName stri
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyObjectStatement` so that the
 	// unsigned request goes through and its validated again.
 	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIAbortMultipartHandler", bucketName, objectName, instanceType,
-		apiRouter, anonReq, getWriteOnlyObjectStatement)
+		apiRouter, anonReq, getAnonWriteOnlyObjectPolicy(bucketName, objectName))
 
 	// HTTP request to test the case of `objectLayer` being set to `nil`.
 	// There is no need to use an existing bucket or valid input for creating the request,
@@ -2633,12 +2602,7 @@ func TestAPIDeleteObjectHandler(t *testing.T) {
 func testAPIDeleteObjectHandler(obj ObjectLayer, instanceType, bucketName string, apiRouter http.Handler,
 	credentials auth.Credentials, t *testing.T) {
 
-	// register event notifier.
-	err := initEventNotifier(obj)
-
-	if err != nil {
-		t.Fatal("Notifier initialization failed.")
-	}
+	var err error
 
 	objectName := "test-object"
 	// Object used for anonymous API request test.
@@ -2667,7 +2631,7 @@ func testAPIDeleteObjectHandler(obj ObjectLayer, instanceType, bucketName string
 	// iterate through the above set of inputs and upload the object.
 	for i, input := range putObjectInputs {
 		// uploading the object.
-		_, err = obj.PutObject(input.bucketName, input.objectName, mustGetHashReader(t, bytes.NewBuffer(input.textData), input.contentLength, input.metaData[""], ""), input.metaData)
+		_, err = obj.PutObject(context.Background(), input.bucketName, input.objectName, mustGetHashReader(t, bytes.NewBuffer(input.textData), input.contentLength, input.metaData[""], ""), input.metaData)
 		// if object upload fails stop the test.
 		if err != nil {
 			t.Fatalf("Put Object case %d:  Error uploading object: <ERROR> %v", i+1, err)
@@ -2770,7 +2734,7 @@ func testAPIDeleteObjectHandler(obj ObjectLayer, instanceType, bucketName string
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyObjectStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIDeleteObjectHandler", bucketName, anonObjectName, instanceType, apiRouter, anonReq, getWriteOnlyObjectStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIDeleteObjectHandler", bucketName, anonObjectName, instanceType, apiRouter, anonReq, getAnonWriteOnlyObjectPolicy(bucketName, anonObjectName))
 
 	// HTTP request to test the case of `objectLayer` being set to `nil`.
 	// There is no need to use an existing bucket or valid input for creating the request,
@@ -2961,7 +2925,7 @@ func testAPIPutObjectPartHandler(obj ObjectLayer, instanceType, bucketName strin
 	// PutObjectPart API HTTP Handler has to be tested in isolation,
 	// that is without any other handler being registered,
 	// That's why NewMultipartUpload is initiated using ObjectLayer.
-	uploadID, err := obj.NewMultipartUpload(bucketName, testObject, nil)
+	uploadID, err := obj.NewMultipartUpload(context.Background(), bucketName, testObject, nil)
 	if err != nil {
 		// Failed to create NewMultipartUpload, abort.
 		t.Fatalf("Minio %s : <ERROR>  %s", instanceType, err)
@@ -3241,7 +3205,7 @@ func testAPIPutObjectPartHandler(obj ObjectLayer, instanceType, bucketName strin
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyObjectStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIPutObjectPartHandler", bucketName, testObject, instanceType, apiRouter, anonReq, getWriteOnlyObjectStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIPutObjectPartHandler", bucketName, testObject, instanceType, apiRouter, anonReq, getAnonWriteOnlyObjectPolicy(bucketName, testObject))
 
 	// HTTP request for testing when `ObjectLayer` is set to `nil`.
 	// There is no need to use an existing bucket and valid input for creating the request
@@ -3364,7 +3328,7 @@ func testAPIListObjectPartsHandler(obj ObjectLayer, instanceType, bucketName str
 	// PutObjectPart API HTTP Handler has to be tested in isolation,
 	// that is without any other handler being registered,
 	// That's why NewMultipartUpload is initiated using ObjectLayer.
-	uploadID, err := obj.NewMultipartUpload(bucketName, testObject, nil)
+	uploadID, err := obj.NewMultipartUpload(context.Background(), bucketName, testObject, nil)
 	if err != nil {
 		// Failed to create NewMultipartUpload, abort.
 		t.Fatalf("Minio %s : <ERROR>  %s", instanceType, err)
@@ -3373,7 +3337,7 @@ func testAPIListObjectPartsHandler(obj ObjectLayer, instanceType, bucketName str
 	uploadIDCopy := uploadID
 
 	// create an object Part, will be used to test list object parts.
-	_, err = obj.PutObjectPart(bucketName, testObject, uploadID, 1, mustGetHashReader(t, bytes.NewReader([]byte("hello")), int64(len("hello")), "5d41402abc4b2a76b9719d911017c592", ""))
+	_, err = obj.PutObjectPart(context.Background(), bucketName, testObject, uploadID, 1, mustGetHashReader(t, bytes.NewReader([]byte("hello")), int64(len("hello")), "5d41402abc4b2a76b9719d911017c592", ""))
 	if err != nil {
 		t.Fatalf("Minio %s : %s.", instanceType, err)
 	}
@@ -3544,7 +3508,7 @@ func testAPIListObjectPartsHandler(obj ObjectLayer, instanceType, bucketName str
 	// ExecObjectLayerAPIAnonTest - Calls the HTTP API handler using the anonymous request, validates the ErrAccessDeniedResponse,
 	// sets the bucket policy using the policy statement generated from `getWriteOnlyObjectStatement` so that the
 	// unsigned request goes through and its validated again.
-	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIListObjectPartsHandler", bucketName, testObject, instanceType, apiRouter, anonReq, getWriteOnlyObjectStatement)
+	ExecObjectLayerAPIAnonTest(t, obj, "TestAPIListObjectPartsHandler", bucketName, testObject, instanceType, apiRouter, anonReq, getAnonWriteOnlyObjectPolicy(bucketName, testObject))
 
 	// HTTP request for testing when `objectLayer` is set to `nil`.
 	// There is no need to use an existing bucket and valid input for creating the request

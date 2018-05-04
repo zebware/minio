@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2016 Minio, Inc.
+ * Minio Cloud Storage, (C) 2016, 2017, 2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,10 +17,13 @@
 package cmd
 
 import (
+	"context"
 	"net"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/minio/minio/pkg/event"
 )
 
 // Validates the preconditions for CopyObjectPart, returns true if CopyObjectPart
@@ -229,10 +232,13 @@ func isETagEqual(left, right string) bool {
 // deleteObject is a convenient wrapper to delete an object, this
 // is a common function to be called from object handlers and
 // web handlers.
-func deleteObject(obj ObjectLayer, bucket, object string, r *http.Request) (err error) {
-
+func deleteObject(ctx context.Context, obj ObjectLayer, cache CacheObjectLayer, bucket, object string, r *http.Request) (err error) {
+	deleteObject := obj.DeleteObject
+	if cache != nil {
+		deleteObject = cache.DeleteObject
+	}
 	// Proceed to delete the object.
-	if err = obj.DeleteObject(bucket, object); err != nil {
+	if err = deleteObject(ctx, bucket, object); err != nil {
 		return err
 	}
 
@@ -240,10 +246,10 @@ func deleteObject(obj ObjectLayer, bucket, object string, r *http.Request) (err 
 	host, port, _ := net.SplitHostPort(r.RemoteAddr)
 
 	// Notify object deleted event.
-	eventNotify(eventData{
-		Type:   ObjectRemovedDelete,
-		Bucket: bucket,
-		ObjInfo: ObjectInfo{
+	sendEvent(eventArgs{
+		EventName:  event.ObjectRemovedDelete,
+		BucketName: bucket,
+		Object: ObjectInfo{
 			Name: object,
 		},
 		ReqParams: extractReqParams(r),

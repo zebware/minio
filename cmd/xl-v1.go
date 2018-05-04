@@ -17,21 +17,19 @@
 package cmd
 
 import (
+	"context"
 	"sort"
 	"time"
 
+	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/bpool"
 	"github.com/minio/minio/pkg/disk"
-	"github.com/minio/minio/pkg/errors"
 )
 
 // XL constants.
 const (
 	// XL metadata file carries per object metadata.
 	xlMetaJSONFile = "xl.json"
-
-	// Uploads metadata file carries per multipart object metadata.
-	uploadsJSONFile = "uploads.json"
 )
 
 // xlObjects - Implements XL object layer.
@@ -45,9 +43,6 @@ type xlObjects struct {
 	// Byte pools used for temporary i/o buffers.
 	bp *bpool.BytePoolCap
 
-	// Variable represents bucket policies in memory.
-	bucketPolicies *bucketPolicies
-
 	// TODO: Deprecated only kept here for tests, should be removed in future.
 	storageDisks []StorageAPI
 
@@ -59,23 +54,16 @@ type xlObjects struct {
 var xlTreeWalkIgnoredErrs = append(baseIgnoredErrs, errDiskAccessDenied, errVolumeNotFound, errFileNotFound)
 
 // Shutdown function for object storage interface.
-func (xl xlObjects) Shutdown() error {
+func (xl xlObjects) Shutdown(ctx context.Context) error {
 	// Add any object layer shutdown activities here.
-	for _, disk := range xl.getDisks() {
-		// This closes storage rpc client connections if any.
-		// Otherwise this is a no-op.
-		if disk == nil {
-			continue
-		}
-		disk.Close()
-	}
+	closeStorageDisks(xl.getDisks())
 	return nil
 }
 
 // Locking operations
 
 // List namespace locks held in object layer
-func (xl xlObjects) ListLocks(bucket, prefix string, duration time.Duration) ([]VolumeLockInfo, error) {
+func (xl xlObjects) ListLocks(ctx context.Context, bucket, prefix string, duration time.Duration) ([]VolumeLockInfo, error) {
 	xl.nsMutex.lockMapMutex.Lock()
 	defer xl.nsMutex.lockMapMutex.Unlock()
 	// Fetch current time once instead of fetching system time for every lock.
@@ -121,7 +109,7 @@ func (xl xlObjects) ListLocks(bucket, prefix string, duration time.Duration) ([]
 }
 
 // Clear namespace locks held in object layer
-func (xl xlObjects) ClearLocks(volLocks []VolumeLockInfo) error {
+func (xl xlObjects) ClearLocks(ctx context.Context, volLocks []VolumeLockInfo) error {
 	// Remove lock matching bucket/prefix held longer than duration.
 	for _, volLock := range volLocks {
 		xl.nsMutex.ForceUnlock(volLock.Bucket, volLock.Object)
@@ -149,8 +137,8 @@ func getDisksInfo(disks []StorageAPI) (disksInfo []disk.Info, onlineDisks int, o
 		}
 		info, err := storageDisk.DiskInfo()
 		if err != nil {
-			errorIf(err, "Unable to fetch disk info for %#v", storageDisk)
-			if errors.IsErr(err, baseErrs...) {
+			logger.LogIf(context.Background(), err)
+			if IsErr(err, baseErrs...) {
 				offlineDisks++
 				continue
 			}
@@ -199,6 +187,12 @@ func getStorageInfo(disks []StorageAPI) StorageInfo {
 	// This is the number of drives we report free and total space for
 	availableDataDisks := uint64(onlineDisks - sscParity)
 
+	// Available data disks can be zero when onlineDisks is equal to parity,
+	// at that point we simply choose online disks to calculate the size.
+	if availableDataDisks == 0 {
+		availableDataDisks = uint64(onlineDisks)
+	}
+
 	// Return calculated storage info, choose the lowest Total and
 	// Free as the total aggregated values. Total capacity is always
 	// the multiple of smallest disk among the disk list.
@@ -218,6 +212,6 @@ func getStorageInfo(disks []StorageAPI) StorageInfo {
 }
 
 // StorageInfo - returns underlying storage statistics.
-func (xl xlObjects) StorageInfo() StorageInfo {
+func (xl xlObjects) StorageInfo(ctx context.Context) StorageInfo {
 	return getStorageInfo(xl.getDisks())
 }

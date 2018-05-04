@@ -17,10 +17,12 @@
 package nas
 
 import (
+	"context"
+
 	"github.com/minio/cli"
-	"github.com/minio/minio-go/pkg/policy"
 	minio "github.com/minio/minio/cmd"
 	"github.com/minio/minio/pkg/auth"
+	"github.com/minio/minio/pkg/policy"
 )
 
 const (
@@ -48,13 +50,29 @@ ENVIRONMENT VARIABLES:
   BROWSER:
      MINIO_BROWSER: To disable web browser access, set this value to "off".
 
+  CACHE:
+     MINIO_CACHE_DRIVES: List of mounted drives or directories delimited by ";".
+     MINIO_CACHE_EXCLUDE: List of cache exclusion patterns delimited by ";".
+     MINIO_CACHE_EXPIRY: Cache expiry duration in days.
+
   UPDATE:
      MINIO_UPDATE: To turn off in-place upgrades, set this value to "off".
+
+  DOMAIN:
+     MINIO_DOMAIN: To enable virtual-host-style requests, set this value to Minio host domain name.
 
 EXAMPLES:
   1. Start minio gateway server for NAS backend.
       $ export MINIO_ACCESS_KEY=accesskey
       $ export MINIO_SECRET_KEY=secretkey
+      $ {{.HelpName}} /shared/nasvol
+ 
+  2. Start minio gateway server for NAS with edge caching enabled.
+      $ export MINIO_ACCESS_KEY=accesskey			
+      $ export MINIO_SECRET_KEY=secretkey
+      $ export MINIO_CACHE_DRIVES="/mnt/drive1;/mnt/drive2;/mnt/drive3;/mnt/drive4"
+      $ export MINIO_CACHE_EXCLUDE="bucket1/*;*.png"
+      $ export MINIO_CACHE_EXPIRY=40
       $ {{.HelpName}} /shared/nasvol
 `
 
@@ -71,8 +89,8 @@ EXAMPLES:
 func nasGatewayMain(ctx *cli.Context) {
 	// Validate gateway arguments.
 	host := ctx.Args().First()
-	if host == "" {
-		cli.ShowCommandHelpAndExit(ctx, "nas", 1)
+	if host == "help" {
+		cli.ShowCommandHelpAndExit(ctx, nasBackend, 1)
 	}
 	// Validate gateway arguments.
 	minio.StartGateway(ctx, &NAS{host})
@@ -114,6 +132,6 @@ func (l *nasObjects) IsNotificationSupported() bool {
 }
 
 // GetBucketPolicy will get policy on bucket
-func (l *nasObjects) GetBucketPolicy(bucket string) (policy.BucketAccessPolicy, error) {
-	return minio.ReadBucketPolicy(bucket, l)
+func (l *nasObjects) GetBucketPolicy(ctx context.Context, bucket string) (*policy.Policy, error) {
+	return minio.GetPolicyConfig(l, bucket)
 }

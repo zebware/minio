@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -180,41 +181,41 @@ func testObjectQuorumFromMeta(obj ObjectLayer, instanceType string, dirs []strin
 	xl := obj.(*xlObjects)
 	xlDisks := xl.storageDisks
 
-	err := obj.MakeBucketWithLocation(bucket, globalMinioDefaultRegion)
+	err := obj.MakeBucketWithLocation(context.Background(), bucket, globalMinioDefaultRegion)
 	if err != nil {
 		t.Fatalf("Failed to make a bucket %v", err)
 	}
 
 	// Object for test case 1 - No StorageClass defined, no MetaData in PutObject
 	object1 := "object1"
-	_, err = obj.PutObject(bucket, object1, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), nil)
+	_, err = obj.PutObject(context.Background(), bucket, object1, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), nil)
 	if err != nil {
 		t.Fatalf("Failed to putObject %v", err)
 	}
 
-	parts1, errs1 := readAllXLMetadata(xlDisks, bucket, object1)
+	parts1, errs1 := readAllXLMetadata(context.Background(), xlDisks, bucket, object1)
 
 	// Object for test case 2 - No StorageClass defined, MetaData in PutObject requesting RRS Class
 	object2 := "object2"
 	metadata2 := make(map[string]string)
 	metadata2["x-amz-storage-class"] = reducedRedundancyStorageClass
-	_, err = obj.PutObject(bucket, object2, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata2)
+	_, err = obj.PutObject(context.Background(), bucket, object2, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata2)
 	if err != nil {
 		t.Fatalf("Failed to putObject %v", err)
 	}
 
-	parts2, errs2 := readAllXLMetadata(xlDisks, bucket, object2)
+	parts2, errs2 := readAllXLMetadata(context.Background(), xlDisks, bucket, object2)
 
 	// Object for test case 3 - No StorageClass defined, MetaData in PutObject requesting Standard Storage Class
 	object3 := "object3"
 	metadata3 := make(map[string]string)
 	metadata3["x-amz-storage-class"] = standardStorageClass
-	_, err = obj.PutObject(bucket, object3, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata3)
+	_, err = obj.PutObject(context.Background(), bucket, object3, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata3)
 	if err != nil {
 		t.Fatalf("Failed to putObject %v", err)
 	}
 
-	parts3, errs3 := readAllXLMetadata(xlDisks, bucket, object3)
+	parts3, errs3 := readAllXLMetadata(context.Background(), xlDisks, bucket, object3)
 
 	// Object for test case 4 - Standard StorageClass defined as Parity 6, MetaData in PutObject requesting Standard Storage Class
 	object4 := "object4"
@@ -225,12 +226,12 @@ func testObjectQuorumFromMeta(obj ObjectLayer, instanceType string, dirs []strin
 		Scheme: "EC",
 	}
 
-	_, err = obj.PutObject(bucket, object4, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata4)
+	_, err = obj.PutObject(context.Background(), bucket, object4, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata4)
 	if err != nil {
 		t.Fatalf("Failed to putObject %v", err)
 	}
 
-	parts4, errs4 := readAllXLMetadata(xlDisks, bucket, object4)
+	parts4, errs4 := readAllXLMetadata(context.Background(), xlDisks, bucket, object4)
 
 	// Object for test case 5 - RRS StorageClass defined as Parity 2, MetaData in PutObject requesting RRS Class
 	// Reset global storage class flags
@@ -243,12 +244,12 @@ func testObjectQuorumFromMeta(obj ObjectLayer, instanceType string, dirs []strin
 		Scheme: "EC",
 	}
 
-	_, err = obj.PutObject(bucket, object5, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata5)
+	_, err = obj.PutObject(context.Background(), bucket, object5, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata5)
 	if err != nil {
 		t.Fatalf("Failed to putObject %v", err)
 	}
 
-	parts5, errs5 := readAllXLMetadata(xlDisks, bucket, object5)
+	parts5, errs5 := readAllXLMetadata(context.Background(), xlDisks, bucket, object5)
 
 	// Object for test case 6 - RRS StorageClass defined as Parity 2, MetaData in PutObject requesting Standard Storage Class
 	// Reset global storage class flags
@@ -261,12 +262,12 @@ func testObjectQuorumFromMeta(obj ObjectLayer, instanceType string, dirs []strin
 		Scheme: "EC",
 	}
 
-	_, err = obj.PutObject(bucket, object6, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata6)
+	_, err = obj.PutObject(context.Background(), bucket, object6, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata6)
 	if err != nil {
 		t.Fatalf("Failed to putObject %v", err)
 	}
 
-	parts6, errs6 := readAllXLMetadata(xlDisks, bucket, object6)
+	parts6, errs6 := readAllXLMetadata(context.Background(), xlDisks, bucket, object6)
 
 	// Object for test case 7 - Standard StorageClass defined as Parity 5, MetaData in PutObject requesting RRS Class
 	// Reset global storage class flags
@@ -279,12 +280,12 @@ func testObjectQuorumFromMeta(obj ObjectLayer, instanceType string, dirs []strin
 		Scheme: "EC",
 	}
 
-	_, err = obj.PutObject(bucket, object7, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata7)
+	_, err = obj.PutObject(context.Background(), bucket, object7, mustGetHashReader(t, bytes.NewReader(data), int64(len(data)), "", ""), metadata7)
 	if err != nil {
 		t.Fatalf("Failed to putObject %v", err)
 	}
 
-	parts7, errs7 := readAllXLMetadata(xlDisks, bucket, object7)
+	parts7, errs7 := readAllXLMetadata(context.Background(), xlDisks, bucket, object7)
 
 	tests := []struct {
 		parts               []xlMetaV1

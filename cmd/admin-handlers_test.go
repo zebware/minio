@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2016, 2017 Minio, Inc.
+ * Minio Cloud Storage, (C) 2016, 2017, 2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,6 +18,7 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -30,9 +31,8 @@ import (
 	"testing"
 	"time"
 
-	router "github.com/gorilla/mux"
+	"github.com/gorilla/mux"
 	"github.com/minio/minio/pkg/auth"
-	"github.com/minio/minio/pkg/errors"
 	"github.com/minio/minio/pkg/madmin"
 )
 
@@ -140,7 +140,7 @@ type adminXLTestBed struct {
 	configPath string
 	xlDirs     []string
 	objLayer   ObjectLayer
-	mux        *router.Router
+	router     *mux.Router
 }
 
 // prepareAdminXLTestBed - helper function that setups a single-node
@@ -176,15 +176,23 @@ func prepareAdminXLTestBed() (*adminXLTestBed, error) {
 	// Init global heal state
 	initAllHealState(globalIsXL)
 
+	globalNotificationSys, err = NewNotificationSys(globalServerConfig, globalEndpoints)
+	if err != nil {
+		return nil, err
+	}
+
+	// Create new policy system.
+	globalPolicySys = NewPolicySys()
+
 	// Setup admin mgmt REST API handlers.
-	adminRouter := router.NewRouter()
+	adminRouter := mux.NewRouter()
 	registerAdminRouter(adminRouter)
 
 	return &adminXLTestBed{
 		configPath: rootPath,
 		xlDirs:     xlDirs,
 		objLayer:   objLayer,
-		mux:        adminRouter,
+		router:     adminRouter,
 	}, nil
 }
 
@@ -199,7 +207,7 @@ func (atb *adminXLTestBed) TearDown() {
 func (atb *adminXLTestBed) GenerateHealTestData(t *testing.T) {
 	// Create an object myobject under bucket mybucket.
 	bucketName := "mybucket"
-	err := atb.objLayer.MakeBucketWithLocation(bucketName, "")
+	err := atb.objLayer.MakeBucketWithLocation(context.Background(), bucketName, "")
 	if err != nil {
 		t.Fatalf("Failed to make bucket %s - %v", bucketName,
 			err)
@@ -210,7 +218,7 @@ func (atb *adminXLTestBed) GenerateHealTestData(t *testing.T) {
 		objName := "myobject"
 		for i := 0; i < 10; i++ {
 			objectName := fmt.Sprintf("%s-%d", objName, i)
-			_, err = atb.objLayer.PutObject(bucketName, objectName,
+			_, err = atb.objLayer.PutObject(context.Background(), bucketName, objectName,
 				mustGetHashReader(t, bytes.NewReader([]byte("hello")),
 					int64(len("hello")), "", ""), nil)
 			if err != nil {
@@ -223,13 +231,13 @@ func (atb *adminXLTestBed) GenerateHealTestData(t *testing.T) {
 	// create a multipart upload (incomplete)
 	{
 		objName := "mpObject"
-		uploadID, err := atb.objLayer.NewMultipartUpload(bucketName,
+		uploadID, err := atb.objLayer.NewMultipartUpload(context.Background(), bucketName,
 			objName, nil)
 		if err != nil {
 			t.Fatalf("mp new error: %v", err)
 		}
 
-		_, err = atb.objLayer.PutObjectPart(bucketName, objName,
+		_, err = atb.objLayer.PutObjectPart(context.Background(), bucketName, objName,
 			uploadID, 3, mustGetHashReader(t, bytes.NewReader(
 				[]byte("hello")), int64(len("hello")), "", ""))
 		if err != nil {
@@ -243,11 +251,11 @@ func (atb *adminXLTestBed) CleanupHealTestData(t *testing.T) {
 	bucketName := "mybucket"
 	objName := "myobject"
 	for i := 0; i < 10; i++ {
-		atb.objLayer.DeleteObject(bucketName,
+		atb.objLayer.DeleteObject(context.Background(), bucketName,
 			fmt.Sprintf("%s-%d", objName, i))
 	}
 
-	atb.objLayer.DeleteBucket(bucketName)
+	atb.objLayer.DeleteBucket(context.Background(), bucketName)
 }
 
 // initTestObjLayer - Helper function to initialize an XL-based object
@@ -258,7 +266,7 @@ func initTestXLObjLayer() (ObjectLayer, []string, error) {
 		return nil, nil, err
 	}
 	endpoints := mustGetNewEndpointList(xlDirs...)
-	format, err := waitForFormatXL(true, endpoints, 1, 16)
+	format, err := waitForFormatXL(context.Background(), true, endpoints, 1, 16)
 	if err != nil {
 		removeRoots(xlDirs)
 		return nil, nil, err
@@ -294,7 +302,7 @@ func TestAdminVersionHandler(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	adminTestBed.mux.ServeHTTP(rec, req)
+	adminTestBed.router.ServeHTTP(rec, req)
 	if http.StatusOK != rec.Code {
 		t.Errorf("Unexpected status code - got %d but expected %d",
 			rec.Code, http.StatusOK)
@@ -435,7 +443,7 @@ func testServicesCmdHandler(cmd cmdType, t *testing.T) {
 	globalMinioAddr = "127.0.0.1:9000"
 	initGlobalAdminPeers(mustGetNewEndpointList("http://127.0.0.1:9000/d1"))
 
-	// Setting up a go routine to simulate ServerMux's
+	// Setting up a go routine to simulate ServerRouter's
 	// handleServiceSignals for stop and restart commands.
 	if cmd == restartCmd {
 		go testServiceSignalReceiver(cmd, t)
@@ -454,7 +462,7 @@ func testServicesCmdHandler(cmd cmdType, t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	adminTestBed.mux.ServeHTTP(rec, req)
+	adminTestBed.router.ServeHTTP(rec, req)
 
 	if cmd == statusCmd {
 		expectedInfo := madmin.ServiceStatus{
@@ -538,7 +546,7 @@ func TestServiceSetCreds(t *testing.T) {
 		rec := httptest.NewRecorder()
 
 		// Execute request
-		adminTestBed.mux.ServeHTTP(rec, req)
+		adminTestBed.router.ServeHTTP(rec, req)
 
 		// Check if the http code response is expected
 		if rec.Code != testCase.ExpectedStatusCode {
@@ -631,7 +639,7 @@ func TestListLocksHandler(t *testing.T) {
 			t.Fatalf("Test %d - Failed to sign list locks request - %v", i+1, err)
 		}
 		rec := httptest.NewRecorder()
-		adminTestBed.mux.ServeHTTP(rec, req)
+		adminTestBed.router.ServeHTTP(rec, req)
 		if test.expectedStatus != rec.Code {
 			t.Errorf("Test %d - Expected HTTP status code %d but received %d", i+1, test.expectedStatus, rec.Code)
 		}
@@ -698,7 +706,7 @@ func TestClearLocksHandler(t *testing.T) {
 			t.Fatalf("Test %d - Failed to sign clear locks request - %v", i+1, err)
 		}
 		rec := httptest.NewRecorder()
-		adminTestBed.mux.ServeHTTP(rec, req)
+		adminTestBed.router.ServeHTTP(rec, req)
 		if test.expectedStatus != rec.Code {
 			t.Errorf("Test %d - Expected HTTP status code %d but received %d", i+1, test.expectedStatus, rec.Code)
 		}
@@ -756,13 +764,13 @@ func buildAdminRequest(queryVal url.Values, method, path string,
 		"/minio/admin/v1"+path+"?"+queryVal.Encode(),
 		contentLength, bodySeeker)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	cred := globalServerConfig.GetCredential()
 	err = signRequestV4(req, cred.AccessKey, cred.SecretKey)
 	if err != nil {
-		return nil, errors.Trace(err)
+		return nil, err
 	}
 
 	return req, nil
@@ -790,7 +798,7 @@ func TestGetConfigHandler(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	adminTestBed.mux.ServeHTTP(rec, req)
+	adminTestBed.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("Expected to succeed but failed with %d", rec.Code)
 	}
@@ -824,7 +832,7 @@ func TestSetConfigHandler(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	adminTestBed.mux.ServeHTTP(rec, req)
+	adminTestBed.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("Expected to succeed but failed with %d", rec.Code)
 	}
@@ -850,7 +858,7 @@ func TestSetConfigHandler(t *testing.T) {
 		}
 
 		rec := httptest.NewRecorder()
-		adminTestBed.mux.ServeHTTP(rec, req)
+		adminTestBed.router.ServeHTTP(rec, req)
 		respBody := string(rec.Body.Bytes())
 		if rec.Code != http.StatusBadRequest ||
 			!strings.Contains(respBody, "Configuration data provided exceeds the allowed maximum of") {
@@ -869,7 +877,7 @@ func TestSetConfigHandler(t *testing.T) {
 		}
 
 		rec := httptest.NewRecorder()
-		adminTestBed.mux.ServeHTTP(rec, req)
+		adminTestBed.router.ServeHTTP(rec, req)
 		respBody := string(rec.Body.Bytes())
 		if rec.Code != http.StatusBadRequest ||
 			!strings.Contains(respBody, "JSON configuration provided has objects with duplicate keys") {
@@ -899,7 +907,7 @@ func TestAdminServerInfo(t *testing.T) {
 	}
 
 	rec := httptest.NewRecorder()
-	adminTestBed.mux.ServeHTTP(rec, req)
+	adminTestBed.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Errorf("Expected to succeed but failed with %d", rec.Code)
 	}
@@ -1100,7 +1108,7 @@ func collectHealResults(t *testing.T, adminTestBed *adminXLTestBed, bucket,
 		}
 		req := mkHealStatusReq(t, bucket, prefix, clientToken)
 		rec := httptest.NewRecorder()
-		adminTestBed.mux.ServeHTTP(rec, req)
+		adminTestBed.router.ServeHTTP(rec, req)
 		if http.StatusOK != rec.Code {
 			t.Errorf("Unexpected status code - got %d but expected %d",
 				rec.Code, http.StatusOK)
@@ -1146,7 +1154,7 @@ func TestHealStartNStatusHandler(t *testing.T) {
 	{
 		req := mkHealStartReq(t, bucketName, objName, healOpts)
 		rec := httptest.NewRecorder()
-		adminTestBed.mux.ServeHTTP(rec, req)
+		adminTestBed.router.ServeHTTP(rec, req)
 		if http.StatusOK != rec.Code {
 			t.Errorf("Unexpected status code - got %d but expected %d",
 				rec.Code, http.StatusOK)
@@ -1166,7 +1174,7 @@ func TestHealStartNStatusHandler(t *testing.T) {
 		// test with an invalid client token
 		req := mkHealStatusReq(t, bucketName, objName, hss.ClientToken+hss.ClientToken)
 		rec := httptest.NewRecorder()
-		adminTestBed.mux.ServeHTTP(rec, req)
+		adminTestBed.router.ServeHTTP(rec, req)
 		if rec.Code != http.StatusBadRequest {
 			t.Errorf("Unexpected status code")
 		}

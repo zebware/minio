@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2017 Minio, Inc.
+ * Minio Cloud Storage, (C) 2017, 2018 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -18,11 +18,12 @@ package sia
 
 import (
 	"bytes"
+	"context"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -36,10 +37,9 @@ import (
 	"github.com/minio/cli"
 	"github.com/minio/minio-go/pkg/set"
 	minio "github.com/minio/minio/cmd"
+	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
-	"github.com/minio/minio/pkg/errors"
 	"github.com/minio/minio/pkg/hash"
-	"github.com/minio/sha256-simd"
 )
 
 const (
@@ -72,8 +72,16 @@ ENVIRONMENT VARIABLES: (Default values in parenthesis)
   BROWSER:
      MINIO_BROWSER: To disable web browser access, set this value to "off".
 
+  CACHE:
+     MINIO_CACHE_DRIVES: List of mounted drives or directories delimited by ";".
+     MINIO_CACHE_EXCLUDE: List of cache exclusion patterns delimited by ";".
+     MINIO_CACHE_EXPIRY: Cache expiry duration in days.
+
   UPDATE:
      MINIO_UPDATE: To turn off in-place upgrades, set this value to "off".
+
+  DOMAIN:
+     MINIO_DOMAIN: To enable virtual-host-style requests, set this value to Minio host domain name.
 
   SIA_TEMP_DIR:        The name of the local Sia temporary storage directory. (.sia_temp)
   SIA_API_PASSWORD:    API password for Sia daemon. (default is empty)
@@ -82,6 +90,11 @@ EXAMPLES:
   1. Start minio gateway server for Sia backend.
       $ {{.HelpName}}
 
+  2. Start minio gateway server for Sia backend with edge caching enabled.
+      $ export MINIO_CACHE_DRIVES="/mnt/drive1;/mnt/drive2;/mnt/drive3;/mnt/drive4"
+      $ export MINIO_CACHE_EXCLUDE="bucket1/*;*.png"
+      $ export MINIO_CACHE_EXPIRY=40
+      $ {{.HelpName}}
 `
 
 	minio.RegisterGatewayCommand(cli.Command{
@@ -98,7 +111,7 @@ func siaGatewayMain(ctx *cli.Context) {
 	// Validate gateway arguments.
 	host := ctx.Args().First()
 	// Validate gateway arguments.
-	minio.FatalIf(minio.ValidateGatewayArguments(ctx.GlobalString("address"), host), "Invalid argument")
+	logger.FatalIf(minio.ValidateGatewayArguments(ctx.GlobalString("address"), host), "Invalid argument")
 
 	minio.StartGateway(ctx, &Sia{host})
 }
@@ -150,9 +163,11 @@ func (g *Sia) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error)
 	colorBlue := color.New(color.FgBlue).SprintfFunc()
 	colorBold := color.New(color.Bold).SprintFunc()
 
-	log.Println(colorBlue("\nSia Gateway Configuration:"))
-	log.Println(colorBlue("  Sia Daemon API Address:") + colorBold(fmt.Sprintf(" %s\n", sia.Address)))
-	log.Println(colorBlue("  Sia Temp Directory:") + colorBold(fmt.Sprintf(" %s\n", sia.TempDir)))
+	formatStr := "%" + fmt.Sprintf("%ds", len(sia.Address)+7)
+	logger.StartupMessage(colorBlue("\nSia Configuration:"))
+	logger.StartupMessage(colorBlue("  API Address:") + colorBold(fmt.Sprintf(formatStr, sia.Address)))
+	logger.StartupMessage(colorBlue("  Staging Directory:") + colorBold(fmt.Sprintf(" %s", sia.TempDir)))
+
 	return sia, nil
 }
 
@@ -203,10 +218,11 @@ func (s MethodNotSupported) Error() string {
 // apiGet wraps a GET request with a status code check, such that if the GET does
 // not return 2xx, the error will be read and returned. The response body is
 // not closed.
-func apiGet(addr, call, apiPassword string) (*http.Response, error) {
+func apiGet(ctx context.Context, addr, call, apiPassword string) (*http.Response, error) {
 	req, err := http.NewRequest("GET", "http://"+addr+call, nil)
 	if err != nil {
-		return nil, errors.Trace(err)
+		logger.LogIf(ctx, err)
+		return nil, err
 	}
 	req.Header.Set("User-Agent", "Sia-Agent")
 	if apiPassword != "" {
@@ -214,15 +230,18 @@ func apiGet(addr, call, apiPassword string) (*http.Response, error) {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, errors.Trace(err)
+		logger.LogIf(ctx, err)
+		return nil, err
 	}
 	if resp.StatusCode == http.StatusNotFound {
 		resp.Body.Close()
+		logger.LogIf(ctx, MethodNotSupported{call})
 		return nil, MethodNotSupported{call}
 	}
 	if non2xx(resp.StatusCode) {
 		err := decodeError(resp)
 		resp.Body.Close()
+		logger.LogIf(ctx, err)
 		return nil, err
 	}
 	return resp, nil
@@ -231,7 +250,7 @@ func apiGet(addr, call, apiPassword string) (*http.Response, error) {
 // apiPost wraps a POST request with a status code check, such that if the POST
 // does not return 2xx, the error will be read and returned. The response body
 // is not closed.
-func apiPost(addr, call, vals, apiPassword string) (*http.Response, error) {
+func apiPost(ctx context.Context, addr, call, vals, apiPassword string) (*http.Response, error) {
 	req, err := http.NewRequest("POST", "http://"+addr+call, strings.NewReader(vals))
 	if err != nil {
 		return nil, err
@@ -243,7 +262,8 @@ func apiPost(addr, call, vals, apiPassword string) (*http.Response, error) {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return nil, errors.Trace(err)
+		logger.LogIf(ctx, err)
+		return nil, err
 	}
 
 	if resp.StatusCode == http.StatusNotFound {
@@ -261,8 +281,8 @@ func apiPost(addr, call, vals, apiPassword string) (*http.Response, error) {
 
 // post makes an API call and discards the response. An error is returned if
 // the response status is not 2xx.
-func post(addr, call, vals, apiPassword string) error {
-	resp, err := apiPost(addr, call, vals, apiPassword)
+func post(ctx context.Context, addr, call, vals, apiPassword string) error {
+	resp, err := apiPost(ctx, addr, call, vals, apiPassword)
 	if err != nil {
 		return err
 	}
@@ -271,24 +291,26 @@ func post(addr, call, vals, apiPassword string) error {
 }
 
 // list makes a lists all the uploaded files, decodes the json response.
-func list(addr string, apiPassword string, obj *renterFiles) error {
-	resp, err := apiGet(addr, "/renter/files", apiPassword)
+func list(ctx context.Context, addr string, apiPassword string, obj *renterFiles) error {
+	resp, err := apiGet(ctx, addr, "/renter/files", apiPassword)
 	if err != nil {
 		return err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusNoContent {
+		logger.LogIf(ctx, fmt.Errorf("Expecting a response, but API returned %s", resp.Status))
 		return fmt.Errorf("Expecting a response, but API returned %s", resp.Status)
 	}
-
-	return json.NewDecoder(resp.Body).Decode(obj)
+	err = json.NewDecoder(resp.Body).Decode(obj)
+	logger.LogIf(ctx, err)
+	return err
 }
 
 // get makes an API call and discards the response. An error is returned if the
 // responsee status is not 2xx.
-func get(addr, call, apiPassword string) error {
-	resp, err := apiGet(addr, call, apiPassword)
+func get(ctx context.Context, addr, call, apiPassword string) error {
+	resp, err := apiGet(ctx, addr, call, apiPassword)
 	if err != nil {
 		return err
 	}
@@ -298,17 +320,17 @@ func get(addr, call, apiPassword string) error {
 
 // Shutdown saves any gateway metadata to disk
 // if necessary and reload upon next restart.
-func (s *siaObjects) Shutdown() error {
+func (s *siaObjects) Shutdown(ctx context.Context) error {
 	return nil
 }
 
 // StorageInfo is not relevant to Sia backend.
-func (s *siaObjects) StorageInfo() (si minio.StorageInfo) {
+func (s *siaObjects) StorageInfo(ctx context.Context) (si minio.StorageInfo) {
 	return si
 }
 
 // MakeBucket creates a new container on Sia backend.
-func (s *siaObjects) MakeBucketWithLocation(bucket, location string) error {
+func (s *siaObjects) MakeBucketWithLocation(ctx context.Context, bucket, location string) error {
 	srcFile := path.Join(s.TempDir, minio.MustGetUUID())
 	defer os.Remove(srcFile)
 
@@ -322,26 +344,26 @@ func (s *siaObjects) MakeBucketWithLocation(bucket, location string) error {
 
 	sha256sum := sha256.Sum256([]byte(bucket))
 	var siaObj = path.Join(s.RootDir, bucket, hex.EncodeToString(sha256sum[:]))
-	return post(s.Address, "/renter/upload/"+siaObj, "source="+srcFile, s.password)
+	return post(ctx, s.Address, "/renter/upload/"+siaObj, "source="+srcFile, s.password)
 }
 
 // GetBucketInfo gets bucket metadata.
-func (s *siaObjects) GetBucketInfo(bucket string) (bi minio.BucketInfo, err error) {
+func (s *siaObjects) GetBucketInfo(ctx context.Context, bucket string) (bi minio.BucketInfo, err error) {
 	sha256sum := sha256.Sum256([]byte(bucket))
 	var siaObj = path.Join(s.RootDir, bucket, hex.EncodeToString(sha256sum[:]))
 
 	dstFile := path.Join(s.TempDir, minio.MustGetUUID())
 	defer os.Remove(dstFile)
 
-	if err := get(s.Address, "/renter/download/"+siaObj+"?destination="+url.QueryEscape(dstFile), s.password); err != nil {
+	if err := get(ctx, s.Address, "/renter/download/"+siaObj+"?destination="+url.QueryEscape(dstFile), s.password); err != nil {
 		return bi, err
 	}
 	return minio.BucketInfo{Name: bucket}, nil
 }
 
 // ListBuckets will detect and return existing buckets on Sia.
-func (s *siaObjects) ListBuckets() (buckets []minio.BucketInfo, err error) {
-	sObjs, serr := s.listRenterFiles("")
+func (s *siaObjects) ListBuckets(ctx context.Context) (buckets []minio.BucketInfo, err error) {
+	sObjs, serr := s.listRenterFiles(ctx, "")
 	if serr != nil {
 		return buckets, serr
 	}
@@ -370,15 +392,15 @@ func (s *siaObjects) ListBuckets() (buckets []minio.BucketInfo, err error) {
 }
 
 // DeleteBucket deletes a bucket on Sia.
-func (s *siaObjects) DeleteBucket(bucket string) error {
+func (s *siaObjects) DeleteBucket(ctx context.Context, bucket string) error {
 	sha256sum := sha256.Sum256([]byte(bucket))
 	var siaObj = path.Join(s.RootDir, bucket, hex.EncodeToString(sha256sum[:]))
 
-	return post(s.Address, "/renter/delete/"+siaObj, "", s.password)
+	return post(ctx, s.Address, "/renter/delete/"+siaObj, "", s.password)
 }
 
-func (s *siaObjects) ListObjects(bucket string, prefix string, marker string, delimiter string, maxKeys int) (loi minio.ListObjectsInfo, err error) {
-	siaObjs, siaErr := s.listRenterFiles(bucket)
+func (s *siaObjects) ListObjects(ctx context.Context, bucket string, prefix string, marker string, delimiter string, maxKeys int) (loi minio.ListObjectsInfo, err error) {
+	siaObjs, siaErr := s.listRenterFiles(ctx, bucket)
 	if siaErr != nil {
 		return loi, siaErr
 	}
@@ -410,12 +432,12 @@ func (s *siaObjects) ListObjects(bucket string, prefix string, marker string, de
 	return loi, nil
 }
 
-func (s *siaObjects) GetObject(bucket string, object string, startOffset int64, length int64, writer io.Writer, etag string) error {
+func (s *siaObjects) GetObject(ctx context.Context, bucket string, object string, startOffset int64, length int64, writer io.Writer, etag string) error {
 	dstFile := path.Join(s.TempDir, minio.MustGetUUID())
 	defer os.Remove(dstFile)
 
 	var siaObj = path.Join(s.RootDir, bucket, object)
-	if err := get(s.Address, "/renter/download/"+siaObj+"?destination="+url.QueryEscape(dstFile), s.password); err != nil {
+	if err := get(ctx, s.Address, "/renter/download/"+siaObj+"?destination="+url.QueryEscape(dstFile), s.password); err != nil {
 		return err
 	}
 
@@ -445,11 +467,16 @@ func (s *siaObjects) GetObject(bucket string, object string, startOffset int64, 
 
 	// Reply back invalid range if the input offset and length fall out of range.
 	if startOffset > size || startOffset+length > size {
-		return errors.Trace(minio.InvalidRange{
+		logger.LogIf(ctx, minio.InvalidRange{
 			OffsetBegin:  startOffset,
 			OffsetEnd:    length,
 			ResourceSize: size,
 		})
+		return minio.InvalidRange{
+			OffsetBegin:  startOffset,
+			OffsetEnd:    length,
+			ResourceSize: size,
+		}
 	}
 
 	// Allocate a staging buffer.
@@ -462,10 +489,10 @@ func (s *siaObjects) GetObject(bucket string, object string, startOffset int64, 
 
 // findSiaObject retrieves the siaObjectInfo for the Sia object with the given
 // Sia path name.
-func (s *siaObjects) findSiaObject(bucket, object string) (siaObjectInfo, error) {
+func (s *siaObjects) findSiaObject(ctx context.Context, bucket, object string) (siaObjectInfo, error) {
 	siaPath := path.Join(s.RootDir, bucket, object)
 
-	sObjs, err := s.listRenterFiles("")
+	sObjs, err := s.listRenterFiles(ctx, "")
 	if err != nil {
 		return siaObjectInfo{}, err
 	}
@@ -475,16 +502,19 @@ func (s *siaObjects) findSiaObject(bucket, object string) (siaObjectInfo, error)
 			return sObj, nil
 		}
 	}
-
-	return siaObjectInfo{}, errors.Trace(minio.ObjectNotFound{
+	logger.LogIf(ctx, minio.ObjectNotFound{
 		Bucket: bucket,
 		Object: object,
 	})
+	return siaObjectInfo{}, minio.ObjectNotFound{
+		Bucket: bucket,
+		Object: object,
+	}
 }
 
 // GetObjectInfo reads object info and replies back ObjectInfo
-func (s *siaObjects) GetObjectInfo(bucket string, object string) (minio.ObjectInfo, error) {
-	so, err := s.findSiaObject(bucket, object)
+func (s *siaObjects) GetObjectInfo(ctx context.Context, bucket string, object string) (minio.ObjectInfo, error) {
+	so, err := s.findSiaObject(ctx, bucket, object)
 	if err != nil {
 		return minio.ObjectInfo{}, err
 	}
@@ -500,7 +530,7 @@ func (s *siaObjects) GetObjectInfo(bucket string, object string) (minio.ObjectIn
 }
 
 // PutObject creates a new object with the incoming data,
-func (s *siaObjects) PutObject(bucket string, object string, data *hash.Reader, metadata map[string]string) (objInfo minio.ObjectInfo, err error) {
+func (s *siaObjects) PutObject(ctx context.Context, bucket string, object string, data *hash.Reader, metadata map[string]string) (objInfo minio.ObjectInfo, err error) {
 	srcFile := path.Join(s.TempDir, minio.MustGetUUID())
 	writer, err := os.Create(srcFile)
 	if err != nil {
@@ -513,11 +543,11 @@ func (s *siaObjects) PutObject(bucket string, object string, data *hash.Reader, 
 		return objInfo, err
 	}
 
-	if err = post(s.Address, "/renter/upload/"+path.Join(s.RootDir, bucket, object), "source="+srcFile, s.password); err != nil {
+	if err = post(ctx, s.Address, "/renter/upload/"+path.Join(s.RootDir, bucket, object), "source="+srcFile, s.password); err != nil {
 		os.Remove(srcFile)
 		return objInfo, err
 	}
-	defer s.deleteTempFileWhenUploadCompletes(srcFile, bucket, object)
+	defer s.deleteTempFileWhenUploadCompletes(ctx, srcFile, bucket, object)
 
 	return minio.ObjectInfo{
 		Name:    object,
@@ -529,10 +559,10 @@ func (s *siaObjects) PutObject(bucket string, object string, data *hash.Reader, 
 }
 
 // DeleteObject deletes a blob in bucket
-func (s *siaObjects) DeleteObject(bucket string, object string) error {
+func (s *siaObjects) DeleteObject(ctx context.Context, bucket string, object string) error {
 	// Tell Sia daemon to delete the object
 	var siaObj = path.Join(s.RootDir, bucket, object)
-	return post(s.Address, "/renter/delete/"+siaObj, "", s.password)
+	return post(ctx, s.Address, "/renter/delete/"+siaObj, "", s.password)
 }
 
 // siaObjectInfo represents object info stored on Sia
@@ -551,10 +581,10 @@ type renterFiles struct {
 }
 
 // listRenterFiles will return a list of existing objects in the bucket provided
-func (s *siaObjects) listRenterFiles(bucket string) (siaObjs []siaObjectInfo, err error) {
+func (s *siaObjects) listRenterFiles(ctx context.Context, bucket string) (siaObjs []siaObjectInfo, err error) {
 	// Get list of all renter files
 	var rf renterFiles
-	if err = list(s.Address, s.password, &rf); err != nil {
+	if err = list(ctx, s.Address, s.password, &rf); err != nil {
 		return siaObjs, err
 	}
 
@@ -578,16 +608,15 @@ func (s *siaObjects) listRenterFiles(bucket string) (siaObjs []siaObjectInfo, er
 // deleteTempFileWhenUploadCompletes checks the status of a Sia file upload
 // until it reaches 100% upload progress, then deletes the local temp copy from
 // the filesystem.
-func (s *siaObjects) deleteTempFileWhenUploadCompletes(tempFile string, bucket, object string) {
+func (s *siaObjects) deleteTempFileWhenUploadCompletes(ctx context.Context, tempFile string, bucket, object string) {
 	var soi siaObjectInfo
 	// Wait until 100% upload instead of 1x redundancy because if we delete
 	// after 1x redundancy, the user has to pay the cost of other hosts
 	// redistributing the file.
 	for soi.UploadProgress < 100.0 {
 		var err error
-		soi, err = s.findSiaObject(bucket, object)
+		soi, err = s.findSiaObject(ctx, bucket, object)
 		if err != nil {
-			minio.ErrorIf(err, "Unable to find file uploaded to Sia path %s/%s", bucket, object)
 			break
 		}
 

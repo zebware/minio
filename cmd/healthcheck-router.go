@@ -19,7 +19,7 @@ package cmd
 import (
 	"net/http"
 
-	router "github.com/gorilla/mux"
+	"github.com/gorilla/mux"
 )
 
 const (
@@ -30,14 +30,16 @@ const (
 )
 
 // registerHealthCheckRouter - add handler functions for liveness and readiness routes.
-func registerHealthCheckRouter(mux *router.Router) {
+func registerHealthCheckRouter(router *mux.Router) {
 
 	// Healthcheck router
-	healthRouter := mux.NewRoute().PathPrefix(healthCheckPathPrefix).Subrouter()
+	healthRouter := router.PathPrefix(healthCheckPathPrefix).Subrouter()
 
 	// Liveness handler
 	healthRouter.Methods(http.MethodGet).Path(healthCheckLivenessPath).HandlerFunc(LivenessCheckHandler)
+	healthRouter.Methods(http.MethodHead).Path(healthCheckLivenessPath).HandlerFunc(LivenessCheckHandler)
 
 	// Readiness handler
 	healthRouter.Methods(http.MethodGet).Path(healthCheckReadinessPath).HandlerFunc(ReadinessCheckHandler)
+	healthRouter.Methods(http.MethodHead).Path(healthCheckReadinessPath).HandlerFunc(ReadinessCheckHandler)
 }
