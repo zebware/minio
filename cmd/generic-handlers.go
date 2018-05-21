@@ -420,6 +420,11 @@ func setIgnoreResourcesHandler(h http.Handler) http.Handler {
 // Checks requests for not implemented Bucket resources
 func ignoreNotImplementedBucketResources(req *http.Request) bool {
 	for name := range req.URL.Query() {
+		// Enable GetBucketACL dummy call specifically.
+		if name == "acl" && req.Method == http.MethodGet {
+			return false
+		}
+
 		if notimplementedBucketResourceNames[name] {
 			return true
 		}
@@ -430,6 +435,10 @@ func ignoreNotImplementedBucketResources(req *http.Request) bool {
 // Checks requests for not implemented Object resources
 func ignoreNotImplementedObjectResources(req *http.Request) bool {
 	for name := range req.URL.Query() {
+		// Enable GetObjectACL dummy call specifically.
+		if name == "acl" && req.Method == http.MethodGet {
+			return false
+		}
 		if notimplementedObjectResourceNames[name] {
 			return true
 		}
@@ -449,6 +458,9 @@ var notimplementedBucketResourceNames = map[string]bool{
 	"requestPayment": true,
 	"versioning":     true,
 	"website":        true,
+	"inventory":      true,
+	"metrics":        true,
+	"accelerate":     true,
 }
 
 // List of not implemented object queries
@@ -456,6 +468,9 @@ var notimplementedObjectResourceNames = map[string]bool{
 	"torrent": true,
 	"acl":     true,
 	"policy":  true,
+	"tagging": true,
+	"restore": true,
+	"select":  true,
 }
 
 // Resource handler ServeHTTP() wrapper

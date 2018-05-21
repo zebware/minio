@@ -19,7 +19,6 @@ package cmd
 import (
 	"context"
 	"encoding/hex"
-	"fmt"
 	"io"
 	"io/ioutil"
 	"os"
@@ -80,6 +79,7 @@ func initMetaVolumeFS(fsPath, fsUUID string) error {
 	// optimizing all other calls. Create minio meta volume,
 	// if it doesn't exist yet.
 	metaBucketPath := pathJoin(fsPath, minioMetaBucket)
+
 	if err := os.MkdirAll(metaBucketPath, 0777); err != nil {
 		return err
 	}
@@ -102,8 +102,8 @@ func NewFSObjectLayer(fsPath string) (ObjectLayer, error) {
 	}
 
 	var err error
-	if fsPath, err = checkPathValid(fsPath); err != nil {
-		return nil, err
+	if fsPath, err = getValidPath(fsPath); err != nil {
+		return nil, uiErrUnableToWriteInBackend(err)
 	}
 
 	// Assign a new UUID for FS minio mode. Each server instance
@@ -112,7 +112,7 @@ func NewFSObjectLayer(fsPath string) (ObjectLayer, error) {
 
 	// Initialize meta volume, if volume already exists ignores it.
 	if err = initMetaVolumeFS(fsPath, fsUUID); err != nil {
-		return nil, fmt.Errorf("Unable to initialize '.minio.sys' meta volume, %s", err)
+		return nil, err
 	}
 
 	// Initialize `format.json`, this function also returns.
@@ -142,12 +142,12 @@ func NewFSObjectLayer(fsPath string) (ObjectLayer, error) {
 
 	// Initialize notification system.
 	if err = globalNotificationSys.Init(fs); err != nil {
-		return nil, fmt.Errorf("Unable to initialize notification system. %v", err)
+		return nil, uiErrUnableToReadFromBackend(err).Msg("Unable to initialize notification system")
 	}
 
 	// Initialize policy system.
 	if err = globalPolicySys.Init(fs); err != nil {
-		return nil, fmt.Errorf("Unable to initialize policy system. %v", err)
+		return nil, uiErrUnableToReadFromBackend(err).Msg("Unable to initialize policy system")
 	}
 
 	go fs.cleanupStaleMultipartUploads(ctx, globalMultipartCleanupInterval, globalMultipartExpiry, globalServiceDoneCh)
@@ -480,7 +480,7 @@ func (fs *FSObjects) getObject(ctx context.Context, bucket, object string, offse
 		}
 	}
 
-	if etag != "" {
+	if etag != "" && etag != defaultEtag {
 		objEtag, perr := fs.getObjectETag(ctx, bucket, object, lock)
 		if perr != nil {
 			return toObjectErr(perr, bucket, object)
@@ -563,17 +563,16 @@ func (fs *FSObjects) defaultFsJSON(object string) fsMetaV1 {
 // getObjectInfo - wrapper for reading object metadata and constructs ObjectInfo.
 func (fs *FSObjects) getObjectInfo(ctx context.Context, bucket, object string) (oi ObjectInfo, e error) {
 	fsMeta := fsMetaV1{}
-	fi, err := fsStatDir(ctx, pathJoin(fs.fsPath, bucket, object))
-	if err != nil && err != errFileAccessDenied {
-		return oi, err
-	}
-	if fi != nil {
-		// If file found and request was with object ending with "/", consider it
-		// as directory and return object info
-		if hasSuffix(object, slashSeparator) {
-			return fsMeta.ToObjectInfo(bucket, object, fi), nil
+	if hasSuffix(object, slashSeparator) {
+		// Since we support PUT of a "directory" object, we allow HEAD.
+		if !fsIsDir(ctx, pathJoin(fs.fsPath, bucket, object)) {
+			return oi, errFileNotFound
 		}
-		return oi, errFileNotFound
+		fi, err := fsStatDir(ctx, pathJoin(fs.fsPath, bucket, object))
+		if err != nil {
+			return oi, err
+		}
+		return fsMeta.ToObjectInfo(bucket, object, fi), nil
 	}
 
 	fsMetaPath := pathJoin(fs.fsPath, minioMetaBucket, bucketMetaPrefix, bucket, object, fs.metaJSONFile)
@@ -602,7 +601,7 @@ func (fs *FSObjects) getObjectInfo(ctx context.Context, bucket, object string) (
 	}
 
 	// Stat the file to get file size.
-	fi, err = fsStatFile(ctx, pathJoin(fs.fsPath, bucket, object))
+	fi, err := fsStatFile(ctx, pathJoin(fs.fsPath, bucket, object))
 	if err != nil {
 		return oi, err
 	}
@@ -625,6 +624,10 @@ func (fs *FSObjects) getObjectInfoWithLock(ctx context.Context, bucket, object s
 
 	if _, err := fs.statBucketDir(ctx, bucket); err != nil {
 		return oi, toObjectErr(err, bucket)
+	}
+
+	if strings.HasSuffix(object, slashSeparator) && !fs.isObjectDir(bucket, object) {
+		return oi, errFileNotFound
 	}
 
 	return fs.getObjectInfo(ctx, bucket, object)
@@ -660,7 +663,7 @@ func (fs *FSObjects) parentDirIsObject(ctx context.Context, bucket, parent strin
 		if p == "." || p == "/" {
 			return false
 		}
-		if _, err := fsStatFile(ctx, pathJoin(fs.fsPath, bucket, p)); err == nil {
+		if fsIsFile(ctx, pathJoin(fs.fsPath, bucket, p)) {
 			// If there is already a file at prefix "p", return true.
 			return true
 		}
@@ -890,6 +893,17 @@ func (fs *FSObjects) listDirFactory(isLeaf isLeafFunc) listDirFunc {
 	return listDir
 }
 
+// isObjectDir returns true if the specified bucket & prefix exists
+// and the prefix represents an empty directory. An S3 empty directory
+// is also an empty directory in the FS backend.
+func (fs *FSObjects) isObjectDir(bucket, prefix string) bool {
+	entries, err := readDirN(pathJoin(fs.fsPath, bucket, prefix), 1)
+	if err != nil {
+		return false
+	}
+	return len(entries) == 0
+}
+
 // getObjectETag is a helper function, which returns only the md5sum
 // of the file on the disk.
 func (fs *FSObjects) getObjectETag(ctx context.Context, bucket, entry string, lock bool) (string, error) {
@@ -1019,8 +1033,15 @@ func (fs *FSObjects) ListObjects(ctx context.Context, bucket, prefix, marker, de
 			// object string does not end with "/".
 			return !hasSuffix(object, slashSeparator)
 		}
+		// Return true if the specified object is an empty directory
+		isLeafDir := func(bucket, object string) bool {
+			if !hasSuffix(object, slashSeparator) {
+				return false
+			}
+			return fs.isObjectDir(bucket, object)
+		}
 		listDir := fs.listDirFactory(isLeaf)
-		walkResultCh = startTreeWalk(ctx, bucket, prefix, marker, recursive, listDir, isLeaf, endWalkCh)
+		walkResultCh = startTreeWalk(ctx, bucket, prefix, marker, recursive, listDir, isLeaf, isLeafDir, endWalkCh)
 	}
 
 	var objInfos []ObjectInfo
@@ -1065,7 +1086,7 @@ func (fs *FSObjects) ListObjects(ctx context.Context, bucket, prefix, marker, de
 	result := ListObjectsInfo{IsTruncated: !eof}
 	for _, objInfo := range objInfos {
 		result.NextMarker = objInfo.Name
-		if objInfo.IsDir {
+		if objInfo.IsDir && delimiter == slashSeparator {
 			result.Prefixes = append(result.Prefixes, objInfo.Name)
 			continue
 		}

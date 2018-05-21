@@ -109,8 +109,12 @@ func init() {
 // StartGateway - handler for 'minio gateway <name>'.
 func StartGateway(ctx *cli.Context, gw Gateway) {
 	if gw == nil {
-		logger.FatalIf(errUnexpected, "Gateway implementation not initialized, exiting.")
+		logger.FatalIf(errUnexpected, "Gateway implementation not initialized")
 	}
+
+	// Disable logging until gateway initialization is complete, any
+	// error during initialization will be shown as a fatal message
+	logger.Disable = true
 
 	// Validate if we have access, secret set through environment.
 	gatewayName := gw.Name()
@@ -152,7 +156,7 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 	}
 
 	// Create certs path.
-	logger.FatalIf(createConfigDir(), "Unable to create configuration directories.")
+	logger.FatalIf(createConfigDir(), "Unable to create configuration directories")
 
 	// Initialize gateway config.
 	initConfig()
@@ -169,7 +173,7 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 
 	// Create new notification system.
 	globalNotificationSys, err = NewNotificationSys(globalServerConfig, EndpointList{})
-	logger.FatalIf(err, "Unable to create new notification system.")
+	logger.FatalIf(err, "Unable to create new notification system")
 
 	// Create new policy system.
 	globalPolicySys = NewPolicySys()
@@ -218,6 +222,9 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 		// Print gateway startup message.
 		printGatewayStartupMessage(getAPIEndpoints(gatewayAddr), gatewayName)
 	}
+
+	// Reenable logging
+	logger.Disable = false
 
 	handleSignals()
 }

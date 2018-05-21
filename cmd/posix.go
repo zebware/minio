@@ -72,7 +72,7 @@ func checkPathLength(pathName string) error {
 	return nil
 }
 
-func checkPathValid(path string) (string, error) {
+func getValidPath(path string) (string, error) {
 	if path == "" {
 		return path, errInvalidArgument
 	}
@@ -144,7 +144,7 @@ func isDirEmpty(dirname string) bool {
 // Initialize a new storage disk.
 func newPosix(path string) (StorageAPI, error) {
 	var err error
-	if path, err = checkPathValid(path); err != nil {
+	if path, err = getValidPath(path); err != nil {
 		return nil, err
 	}
 
@@ -467,7 +467,7 @@ func (s *posix) DeleteVol(volume string) (err error) {
 
 // ListDir - return all the entries at the given directory path.
 // If an entry is a directory it will be returned with a trailing "/".
-func (s *posix) ListDir(volume, dirPath string) (entries []string, err error) {
+func (s *posix) ListDir(volume, dirPath string, count int) (entries []string, err error) {
 	defer func() {
 		if err == syscall.EIO {
 			atomic.AddInt32(&s.ioErrCount, 1)
@@ -495,7 +495,12 @@ func (s *posix) ListDir(volume, dirPath string) (entries []string, err error) {
 		}
 		return nil, err
 	}
-	return readDir(pathJoin(volumeDir, dirPath))
+
+	dirPath = pathJoin(volumeDir, dirPath)
+	if count > 0 {
+		return readDirN(dirPath, count)
+	}
+	return readDir(dirPath)
 }
 
 // ReadAll reads from r until an error or EOF and returns the data it read.

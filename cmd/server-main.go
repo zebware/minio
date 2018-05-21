@@ -18,10 +18,11 @@ package cmd
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
-	"runtime"
+	"strings"
 	"syscall"
 
 	"github.com/minio/cli"
@@ -65,6 +66,9 @@ ENVIRONMENT VARIABLES:
      MINIO_ACCESS_KEY: Custom username or access key of minimum 3 characters in length.
      MINIO_SECRET_KEY: Custom password or secret key of minimum 8 characters in length.
 
+  ENDPOINTS:
+     MINIO_ENDPOINTS: List of all endpoints delimited by ' '.
+
   BROWSER:
      MINIO_BROWSER: To disable web browser access, set this value to "off".
 
@@ -73,12 +77,6 @@ ENVIRONMENT VARIABLES:
      MINIO_CACHE_EXCLUDE: List of cache exclusion patterns delimited by ";".
      MINIO_CACHE_EXPIRY: Cache expiry duration in days.
 	
-  REGION:
-     MINIO_REGION: To set custom region. By default all regions are accepted.
-
-  UPDATE:
-     MINIO_UPDATE: To turn off in-place upgrades, set this value to "off".
-
   DOMAIN:
      MINIO_DOMAIN: To enable virtual-host-style requests, set this value to Minio host domain name.
 
@@ -96,14 +94,15 @@ EXAMPLES:
       $ export MINIO_DOMAIN=mydomain.com
       $ {{.HelpName}} --address mydomain.com:9000 /mnt/export
 
-  4. Start minio server on 64 disks server.
-      $ {{.HelpName}} /mnt/export{1...64}
+  4. Start minio server on 64 disks server with endpoints through environment variable.
+      $ export MINIO_ENDPOINTS=/mnt/export{1...64}
+      $ {{.HelpName}}
 
   5. Start distributed minio server on an 8 node setup with 8 drives each. Run following command on all the 8 nodes.
       $ export MINIO_ACCESS_KEY=minio
       $ export MINIO_SECRET_KEY=miniostorage
       $ {{.HelpName}} http://node{1...8}.example.com/mnt/export/{1...8}
-	
+
   6. Start minio server with edge caching enabled.
      $ export MINIO_CACHE_DRIVES="/mnt/drive1;/mnt/drive2;/mnt/drive3;/mnt/drive4"
      $ export MINIO_CACHE_EXCLUDE="bucket1/*;*.png"
@@ -112,32 +111,48 @@ EXAMPLES:
 `,
 }
 
+// Checks if endpoints are either available through environment
+// or command line, returns false if both fails.
+func endpointsPresent(ctx *cli.Context) bool {
+	_, ok := os.LookupEnv("MINIO_ENDPOINTS")
+	if !ok {
+		ok = ctx.Args().Present()
+	}
+	return ok
+}
+
 func serverHandleCmdArgs(ctx *cli.Context) {
 	// Handle common command args.
 	handleCommonCmdArgs(ctx)
 
 	// Server address.
 	serverAddr := ctx.String("address")
-	logger.FatalIf(CheckLocalServerAddr(serverAddr), "Invalid address ‘%s’ in command line argument.", serverAddr)
+	logger.FatalIf(CheckLocalServerAddr(serverAddr), "Unable to validate passed arguments")
 
 	var setupType SetupType
 	var err error
 
 	if len(ctx.Args()) > serverCommandLineArgsMax {
-		logger.FatalIf(errInvalidArgument, "Invalid total number of arguments (%d) passed, supported upto 32 unique arguments", len(ctx.Args()))
+		uErr := uiErrInvalidErasureEndpoints(nil).Msg(fmt.Sprintf("Invalid total number of endpoints (%d) passed, supported upto 32 unique arguments",
+			len(ctx.Args())))
+		logger.FatalIf(uErr, "Unable to validate passed endpoints")
 	}
 
-	globalMinioAddr, globalEndpoints, setupType, globalXLSetCount, globalXLSetDriveCount, err = createServerEndpoints(serverAddr, ctx.Args()...)
-	logger.FatalIf(err, "Invalid command line arguments server=‘%s’, args=%s", serverAddr, ctx.Args())
+	endpoints := strings.Fields(os.Getenv("MINIO_ENDPOINTS"))
+	if len(endpoints) > 0 {
+		globalMinioAddr, globalEndpoints, setupType, globalXLSetCount, globalXLSetDriveCount, err = createServerEndpoints(serverAddr, endpoints...)
+	} else {
+		globalMinioAddr, globalEndpoints, setupType, globalXLSetCount, globalXLSetDriveCount, err = createServerEndpoints(serverAddr, ctx.Args()...)
+	}
+	logger.FatalIf(err, "Invalid command line arguments")
 
 	globalMinioHost, globalMinioPort = mustSplitHostPort(globalMinioAddr)
-	if runtime.GOOS == "darwin" {
-		// On macOS, if a process already listens on LOCALIPADDR:PORT, net.Listen() falls back
-		// to IPv6 address ie minio will start listening on IPv6 address whereas another
-		// (non-)minio process is listening on IPv4 of given port.
-		// To avoid this error sutiation we check for port availability only for macOS.
-		logger.FatalIf(checkPortAvailability(globalMinioPort), "Port %d already in use", globalMinioPort)
-	}
+
+	// On macOS, if a process already listens on LOCALIPADDR:PORT, net.Listen() falls back
+	// to IPv6 address ie minio will start listening on IPv6 address whereas another
+	// (non-)minio process is listening on IPv4 of given port.
+	// To avoid this error sutiation we check for port availability.
+	logger.FatalIf(checkPortAvailability(globalMinioPort), "Unable to start the server")
 
 	globalIsXL = (setupType == XLSetupType)
 	globalIsDistXL = (setupType == DistXLSetupType)
@@ -164,9 +179,13 @@ func init() {
 
 // serverMain handler called for 'minio server' command.
 func serverMain(ctx *cli.Context) {
-	if (!ctx.IsSet("sets") && !ctx.Args().Present()) || ctx.Args().First() == "help" {
+	if ctx.Args().First() == "help" || !endpointsPresent(ctx) {
 		cli.ShowCommandHelpAndExit(ctx, "server", 1)
 	}
+
+	// Disable logging until server initialization is complete, any
+	// error during initialization will be shown as a fatal message
+	logger.Disable = true
 
 	// Get "json" flag from command line argument and
 	// enable json and quite modes if jason flag is turned on.
@@ -181,6 +200,8 @@ func serverMain(ctx *cli.Context) {
 		logger.EnableQuiet()
 	}
 
+	logger.RegisterUIError(fmtError)
+
 	// Handle all server command args.
 	serverHandleCmdArgs(ctx)
 
@@ -188,7 +209,7 @@ func serverMain(ctx *cli.Context) {
 	serverHandleEnvVars()
 
 	// Create certs path.
-	logger.FatalIf(createConfigDir(), "Unable to create configuration directories.")
+	logger.FatalIf(createConfigDir(), "Unable to initialize configuration files")
 
 	// Initialize server config.
 	initConfig()
@@ -196,15 +217,15 @@ func serverMain(ctx *cli.Context) {
 	// Check and load SSL certificates.
 	var err error
 	globalPublicCerts, globalRootCAs, globalTLSCertificate, globalIsSSL, err = getSSLConfig()
-	logger.FatalIf(err, "Invalid SSL certificate file")
+	logger.FatalIf(err, "Unable to load the TLS configuration")
 
 	// Is distributed setup, error out if no certificates are found for HTTPS endpoints.
 	if globalIsDistXL {
 		if globalEndpoints.IsHTTPS() && !globalIsSSL {
-			logger.FatalIf(errInvalidArgument, "No certificates found, use HTTP endpoints (%s)", globalEndpoints)
+			logger.Fatal(uiErrNoCertsAndHTTPSEndpoints(nil), "Unable to start the server")
 		}
 		if !globalEndpoints.IsHTTPS() && globalIsSSL {
-			logger.FatalIf(errInvalidArgument, "TLS Certificates found, use HTTPS endpoints (%s)", globalEndpoints)
+			logger.Fatal(uiErrCertsAndHTTPEndpoints(nil), "Unable to start the server")
 		}
 	}
 
@@ -225,7 +246,9 @@ func serverMain(ctx *cli.Context) {
 	// Set nodes for dsync for distributed setup.
 	if globalIsDistXL {
 		globalDsync, err = dsync.New(newDsyncNodes(globalEndpoints))
-		logger.FatalIf(err, "Unable to initialize distributed locking on %s", globalEndpoints)
+		if err != nil {
+			logger.Fatal(err, "Unable to initialize distributed locking on %s", globalEndpoints)
+		}
 	}
 
 	// Initialize name space lock.
@@ -237,11 +260,15 @@ func serverMain(ctx *cli.Context) {
 	// Configure server.
 	var handler http.Handler
 	handler, err = configureServerHandler(globalEndpoints)
-	logger.FatalIf(err, "Unable to configure one of server's RPC services.")
+	if err != nil {
+		logger.Fatal(uiErrUnexpectedError(err), "Unable to configure one of server's RPC services")
+	}
 
 	// Create new notification system.
 	globalNotificationSys, err = NewNotificationSys(globalServerConfig, globalEndpoints)
-	logger.FatalIf(err, "Unable to create new notification system.")
+	if err != nil {
+		logger.Fatal(err, "Unable to initialize the notification system")
+	}
 
 	// Create new policy system.
 	globalPolicySys = NewPolicySys()
@@ -262,10 +289,8 @@ func serverMain(ctx *cli.Context) {
 
 	newObject, err := newObjectLayer(globalEndpoints)
 	if err != nil {
-		logger.LogIf(context.Background(), err)
-		err = globalHTTPServer.Shutdown()
-		logger.LogIf(context.Background(), err)
-		os.Exit(1)
+		globalHTTPServer.Shutdown()
+		logger.FatalIf(err, "Unable to initialize backend")
 	}
 
 	globalObjLayerMutex.Lock()
@@ -278,6 +303,9 @@ func serverMain(ctx *cli.Context) {
 
 	// Set uptime time after object layer has initialized.
 	globalBootTime = UTCNow()
+
+	// Re-enable logging
+	logger.Disable = false
 
 	handleSignals()
 }
