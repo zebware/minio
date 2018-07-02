@@ -658,6 +658,10 @@ func (l *gcsGateway) ListObjects(ctx context.Context, bucket string, prefix stri
 
 // ListObjectsV2 - lists all blobs in GCS bucket filtered by prefix
 func (l *gcsGateway) ListObjectsV2(ctx context.Context, bucket, prefix, continuationToken, delimiter string, maxKeys int, fetchOwner bool, startAfter string) (minio.ListObjectsV2Info, error) {
+	if continuationToken == "" && startAfter != "" {
+		continuationToken = toGCSPageToken(startAfter)
+	}
+
 	it := l.client.Bucket(bucket).Objects(l.ctx, &storage.Query{
 		Delimiter: delimiter,
 		Prefix:    prefix,
@@ -1136,7 +1140,6 @@ func (l *gcsGateway) CompleteMultipartUpload(ctx context.Context, bucket string,
 func (l *gcsGateway) SetBucketPolicy(ctx context.Context, bucket string, bucketPolicy *policy.Policy) error {
 	policyInfo, err := minio.PolicyToBucketAccessPolicy(bucketPolicy)
 	if err != nil {
-		// This should not happen.
 		logger.LogIf(ctx, err)
 		return gcsToObjectError(err, bucket)
 	}
@@ -1192,7 +1195,6 @@ func (l *gcsGateway) SetBucketPolicy(ctx context.Context, bucket string, bucketP
 func (l *gcsGateway) GetBucketPolicy(ctx context.Context, bucket string) (*policy.Policy, error) {
 	rules, err := l.client.Bucket(bucket).ACL().List(l.ctx)
 	if err != nil {
-		logger.LogIf(ctx, err)
 		return nil, gcsToObjectError(err, bucket)
 	}
 
@@ -1227,7 +1229,6 @@ func (l *gcsGateway) GetBucketPolicy(ctx context.Context, bucket string) (*polic
 
 	// Return NoSuchBucketPolicy error, when policy is not set
 	if len(actionSet) == 0 {
-		logger.LogIf(ctx, minio.BucketPolicyNotFound{})
 		return nil, gcsToObjectError(minio.BucketPolicyNotFound{}, bucket)
 	}
 
@@ -1252,7 +1253,6 @@ func (l *gcsGateway) GetBucketPolicy(ctx context.Context, bucket string) (*polic
 func (l *gcsGateway) DeleteBucketPolicy(ctx context.Context, bucket string) error {
 	// This only removes the storage.AllUsers policies
 	if err := l.client.Bucket(bucket).ACL().Delete(l.ctx, storage.AllUsers); err != nil {
-		logger.LogIf(ctx, err)
 		return gcsToObjectError(err, bucket)
 	}
 

@@ -479,8 +479,11 @@ func ossListObjects(ctx context.Context, client *oss.Client, bucket, prefix, mar
 // ossListObjectsV2 lists all blobs in OSS bucket filtered by prefix.
 func ossListObjectsV2(ctx context.Context, client *oss.Client, bucket, prefix, continuationToken, delimiter string, maxKeys int,
 	fetchOwner bool, startAfter string) (loi minio.ListObjectsV2Info, err error) {
-	// fetchOwner and startAfter are not supported and unused.
+	// fetchOwner is not supported and unused.
 	marker := continuationToken
+	if marker == "" {
+		marker = startAfter
+	}
 
 	resultV1, err := ossListObjects(ctx, client, bucket, prefix, marker, delimiter, maxKeys)
 	if err != nil {
@@ -1018,7 +1021,6 @@ func (l *ossObjects) GetBucketPolicy(ctx context.Context, bucket string) (*polic
 	switch result.ACL {
 	case string(oss.ACLPrivate):
 		// By default, all buckets starts with a "private" policy.
-		logger.LogIf(ctx, minio.BucketPolicyNotFound{})
 		return nil, ossToObjectError(minio.BucketPolicyNotFound{}, bucket)
 	case string(oss.ACLPublicRead):
 		readOnly = true

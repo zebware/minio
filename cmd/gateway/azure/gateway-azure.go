@@ -611,7 +611,7 @@ func (a *azureObjects) ListObjects(ctx context.Context, bucket, prefix, marker, 
 // ListObjectsV2 - list all blobs in Azure bucket filtered by prefix
 func (a *azureObjects) ListObjectsV2(ctx context.Context, bucket, prefix, continuationToken, delimiter string, maxKeys int, fetchOwner bool, startAfter string) (result minio.ListObjectsV2Info, err error) {
 	marker := continuationToken
-	if startAfter != "" {
+	if marker == "" {
 		marker = startAfter
 	}
 
@@ -1131,7 +1131,6 @@ func (a *azureObjects) GetBucketPolicy(ctx context.Context, bucket string) (*pol
 	}
 
 	if perm.AccessType == storage.ContainerAccessTypePrivate {
-		logger.LogIf(ctx, minio.BucketPolicyNotFound{Bucket: bucket})
 		return nil, minio.BucketPolicyNotFound{Bucket: bucket}
 	} else if perm.AccessType != storage.ContainerAccessTypeContainer {
 		logger.LogIf(ctx, minio.NotImplemented{})

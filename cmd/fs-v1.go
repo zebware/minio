@@ -45,8 +45,6 @@ var defaultEtag = "00000000000000000000000000000000-1"
 type FSObjects struct {
 	// Disk usage metrics
 	totalUsed uint64 // ref: https://golang.org/pkg/sync/atomic/#pkg-note-BUG
-	// Disk usage running routine
-	usageRunning int32 // ref: https://golang.org/pkg/sync/atomic/#pkg-note-BUG
 
 	// Path to be exported over S3 API.
 	fsPath string
@@ -112,6 +110,9 @@ func NewFSObjectLayer(fsPath string) (ObjectLayer, error) {
 
 	var err error
 	if fsPath, err = getValidPath(fsPath); err != nil {
+		if err == errMinDiskSize {
+			return nil, err
+		}
 		return nil, uiErrUnableToWriteInBackend(err)
 	}
 
@@ -180,13 +181,14 @@ func (fs *FSObjects) Shutdown(ctx context.Context) error {
 
 // diskUsage returns du information for the posix path, in a continuous routine.
 func (fs *FSObjects) diskUsage(doneCh chan struct{}) {
-	ticker := time.NewTicker(globalUsageCheckInterval)
-	defer ticker.Stop()
-
 	usageFn := func(ctx context.Context, entry string) error {
 		if globalHTTPServer != nil {
+			// Wait at max 1 minute for an inprogress request
+			// before proceeding to count the usage.
+			waitCount := 60
 			// Any requests in progress, delay the usage.
-			for globalHTTPServer.GetRequestCount() > 0 {
+			for globalHTTPServer.GetRequestCount() > 0 && waitCount > 0 {
+				waitCount--
 				time.Sleep(1 * time.Second)
 			}
 		}
@@ -210,34 +212,26 @@ func (fs *FSObjects) diskUsage(doneCh chan struct{}) {
 		return nil
 	}
 
-	// Check if disk usage routine is running, if yes then return.
-	if atomic.LoadInt32(&fs.usageRunning) == 1 {
+	// Return this routine upon errWalkAbort, continue for any other error on purpose
+	// so that we can start the routine freshly in another 12 hours.
+	if err := getDiskUsage(context.Background(), fs.fsPath, usageFn); err == errWalkAbort {
 		return
 	}
-	atomic.StoreInt32(&fs.usageRunning, 1)
-	defer atomic.StoreInt32(&fs.usageRunning, 0)
-
-	if err := getDiskUsage(context.Background(), fs.fsPath, usageFn); err != nil {
-		return
-	}
-	atomic.StoreInt32(&fs.usageRunning, 0)
 
 	for {
 		select {
 		case <-doneCh:
 			return
-		case <-ticker.C:
-			// Check if disk usage routine is running, if yes let it finish.
-			if atomic.LoadInt32(&fs.usageRunning) == 1 {
-				continue
-			}
-			atomic.StoreInt32(&fs.usageRunning, 1)
-
+		case <-time.After(globalUsageCheckInterval):
 			var usage uint64
 			usageFn = func(ctx context.Context, entry string) error {
 				if globalHTTPServer != nil {
+					// Wait at max 1 minute for an inprogress request
+					// before proceeding to count the usage.
+					waitCount := 60
 					// Any requests in progress, delay the usage.
-					for globalHTTPServer.GetRequestCount() > 0 {
+					for globalHTTPServer.GetRequestCount() > 0 && waitCount > 0 {
+						waitCount--
 						time.Sleep(1 * time.Second)
 					}
 				}
@@ -257,11 +251,8 @@ func (fs *FSObjects) diskUsage(doneCh chan struct{}) {
 			}
 
 			if err := getDiskUsage(context.Background(), fs.fsPath, usageFn); err != nil {
-				atomic.StoreInt32(&fs.usageRunning, 0)
 				continue
 			}
-
-			atomic.StoreInt32(&fs.usageRunning, 0)
 			atomic.StoreUint64(&fs.totalUsed, usage)
 		}
 	}
@@ -514,7 +505,7 @@ func (fs *FSObjects) CopyObject(ctx context.Context, srcBucket, srcObject, dstBu
 			}
 			return
 		}
-		// Close writer explicitly signalling we wrote all data.
+		// Close writer explicitly signaling we wrote all data.
 		if gerr := srcInfo.Writer.Close(); gerr != nil {
 			logger.LogIf(ctx, gerr)
 			return
@@ -1259,7 +1250,12 @@ func (fs *FSObjects) DeleteBucketPolicy(ctx context.Context, bucket string) erro
 
 // ListObjectsV2 lists all blobs in bucket filtered by prefix
 func (fs *FSObjects) ListObjectsV2(ctx context.Context, bucket, prefix, continuationToken, delimiter string, maxKeys int, fetchOwner bool, startAfter string) (result ListObjectsV2Info, err error) {
-	loi, err := fs.ListObjects(ctx, bucket, prefix, continuationToken, delimiter, maxKeys)
+	marker := continuationToken
+	if marker == "" {
+		marker = startAfter
+	}
+
+	loi, err := fs.ListObjects(ctx, bucket, prefix, marker, delimiter, maxKeys)
 	if err != nil {
 		return result, err
 	}
