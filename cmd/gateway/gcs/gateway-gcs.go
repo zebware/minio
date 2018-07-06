@@ -688,6 +688,20 @@ func (l *gcsGateway) ListObjectsV2(ctx context.Context, bucket, prefix, continua
 	var objects []minio.ObjectInfo
 
 	for {
+		if len(objects) >= maxKeys {
+			// check if there is one next object and
+			// if that one next object is our hidden
+			// metadata folder, then just break
+			// otherwise we've truncated the output
+			attrs, _ := it.Next()
+			if attrs != nil && attrs.Prefix == minio.GatewayMinioSysTmp {
+				break
+			}
+
+			isTruncated = true
+			break
+		}
+
 		attrs, err := it.Next()
 		if err == iterator.Done {
 			break
