@@ -31,7 +31,6 @@ import (
 	"strings"
 	"time"
 
-	etcd "github.com/coreos/etcd/client"
 	humanize "github.com/dustin/go-humanize"
 	"github.com/gorilla/mux"
 	"github.com/gorilla/rpc/v2/json2"
@@ -139,7 +138,7 @@ func (web *webAPIHandlers) MakeBucket(r *http.Request, args *MakeBucketArgs, rep
 
 	if globalDNSConfig != nil {
 		if _, err := globalDNSConfig.Get(args.BucketName); err != nil {
-			if etcd.IsKeyNotFound(err) || err == dns.ErrNoEntriesFound {
+			if err == dns.ErrNoEntriesFound {
 				// Proceed to creating a bucket.
 				if err = objectAPI.MakeBucketWithLocation(context.Background(), args.BucketName, globalServerConfig.GetRegion()); err != nil {
 					return toJSONError(err)
@@ -193,10 +192,7 @@ func (web *webAPIHandlers) DeleteBucket(r *http.Request, args *RemoveBucketArgs,
 
 	globalNotificationSys.RemoveNotification(args.BucketName)
 	globalPolicySys.Remove(args.BucketName)
-	for nerr := range globalNotificationSys.DeleteBucket(args.BucketName) {
-		logger.GetReqInfo(ctx).AppendTags("remotePeer", nerr.Host.Name)
-		logger.LogIf(ctx, nerr.Err)
-	}
+	globalNotificationSys.DeleteBucket(ctx, args.BucketName)
 
 	if globalDNSConfig != nil {
 		if err := globalDNSConfig.Delete(args.BucketName); err != nil {
@@ -632,7 +628,7 @@ func (web *webAPIHandlers) Upload(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Extract incoming metadata if any.
-	metadata, err := extractMetadataFromHeader(context.Background(), r.Header)
+	metadata, err := extractMetadata(context.Background(), r)
 	if err != nil {
 		writeErrorResponse(w, ErrInternalError, r.URL)
 		return
@@ -979,10 +975,7 @@ func (web *webAPIHandlers) SetBucketPolicy(r *http.Request, args *SetBucketPolic
 	}
 
 	globalPolicySys.Set(args.BucketName, *bucketPolicy)
-	for nerr := range globalNotificationSys.SetBucketPolicy(args.BucketName, bucketPolicy) {
-		logger.GetReqInfo(ctx).AppendTags("remotePeer", nerr.Host.Name)
-		logger.LogIf(ctx, nerr.Err)
-	}
+	globalNotificationSys.SetBucketPolicy(ctx, args.BucketName, bucketPolicy)
 
 	return nil
 }

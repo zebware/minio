@@ -30,18 +30,16 @@ import (
 	"strings"
 	"sync"
 
-	etcd "github.com/coreos/etcd/client"
-
 	"github.com/gorilla/mux"
 
+	"github.com/minio/minio-go/pkg/set"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/dns"
 	"github.com/minio/minio/pkg/event"
+	"github.com/minio/minio/pkg/handlers"
 	"github.com/minio/minio/pkg/hash"
 	"github.com/minio/minio/pkg/policy"
 	"github.com/minio/minio/pkg/sync/errgroup"
-
-	"github.com/minio/minio-go/pkg/set"
 )
 
 // Check if there are buckets on server without corresponding entry in etcd backend and
@@ -64,7 +62,7 @@ func initFederatorBackend(objLayer ObjectLayer) {
 		g.Go(func() error {
 			r, gerr := globalDNSConfig.Get(b[index].Name)
 			if gerr != nil {
-				if etcd.IsKeyNotFound(gerr) || gerr == dns.ErrNoEntriesFound {
+				if gerr == dns.ErrNoEntriesFound {
 					return globalDNSConfig.Put(b[index].Name)
 				}
 				return gerr
@@ -211,7 +209,7 @@ func (api objectAPIHandlers) ListBucketsHandler(w http.ResponseWriter, r *http.R
 	var bucketsInfo []BucketInfo
 	if globalDNSConfig != nil {
 		dnsBuckets, err := globalDNSConfig.List()
-		if err != nil && !etcd.IsKeyNotFound(err) && err != dns.ErrNoEntriesFound {
+		if err != nil && err != dns.ErrNoEntriesFound {
 			writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 			return
 		}
@@ -375,7 +373,7 @@ func (api objectAPIHandlers) DeleteMultipleObjectsHandler(w http.ResponseWriter,
 
 	// Get host and port from Request.RemoteAddr failing which
 	// fill them with empty strings.
-	host, port, err := net.SplitHostPort(r.RemoteAddr)
+	host, port, err := net.SplitHostPort(handlers.GetSourceIP(r))
 	if err != nil {
 		host, port = "", ""
 	}
@@ -432,7 +430,7 @@ func (api objectAPIHandlers) PutBucketHandler(w http.ResponseWriter, r *http.Req
 
 	if globalDNSConfig != nil {
 		if _, err := globalDNSConfig.Get(bucket); err != nil {
-			if etcd.IsKeyNotFound(err) || err == dns.ErrNoEntriesFound {
+			if err == dns.ErrNoEntriesFound {
 				// Proceed to creating a bucket.
 				if err = objectAPI.MakeBucketWithLocation(ctx, bucket, location); err != nil {
 					writeErrorResponse(w, toAPIErrorCode(err), r.URL)
@@ -601,7 +599,8 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 	}
 
 	// Extract metadata to be saved from received Form.
-	metadata, err := extractMetadataFromHeader(ctx, formValues)
+	metadata := make(map[string]string)
+	err = extractMetadataFromMap(ctx, formValues, metadata)
 	if err != nil {
 		writeErrorResponse(w, ErrInternalError, r.URL)
 		return
@@ -623,7 +622,7 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 				writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 				return
 			}
-			reader, err = newEncryptReader(hashReader, key, metadata)
+			reader, err = newEncryptReader(hashReader, key, bucket, object, metadata)
 			if err != nil {
 				writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 				return
@@ -648,7 +647,7 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 	w.Header().Set("Location", location)
 
 	// Get host and port from Request.RemoteAddr.
-	host, port, err := net.SplitHostPort(r.RemoteAddr)
+	host, port, err := net.SplitHostPort(handlers.GetSourceIP(r))
 	if err != nil {
 		host, port = "", ""
 	}
@@ -753,10 +752,7 @@ func (api objectAPIHandlers) DeleteBucketHandler(w http.ResponseWriter, r *http.
 
 	globalNotificationSys.RemoveNotification(bucket)
 	globalPolicySys.Remove(bucket)
-	for nerr := range globalNotificationSys.DeleteBucket(bucket) {
-		logger.GetReqInfo(ctx).AppendTags("remotePeer", nerr.Host.Name)
-		logger.LogIf(ctx, nerr.Err)
-	}
+	globalNotificationSys.DeleteBucket(ctx, bucket)
 
 	if globalDNSConfig != nil {
 		if err := globalDNSConfig.Delete(bucket); err != nil {
