@@ -22,7 +22,6 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
-	"runtime"
 	"strings"
 	"syscall"
 
@@ -83,17 +82,6 @@ func ValidateGatewayArguments(serverAddr, endpointAddr string) error {
 		return err
 	}
 
-	if runtime.GOOS == "darwin" {
-		_, port := mustSplitHostPort(serverAddr)
-		// On macOS, if a process already listens on LOCALIPADDR:PORT, net.Listen() falls back
-		// to IPv6 address i.e minio will start listening on IPv6 address whereas another
-		// (non-)minio process is listening on IPv4 of given port.
-		// To avoid this error situation we check for port availability only for macOS.
-		if err := checkPortAvailability(port); err != nil {
-			return err
-		}
-	}
-
 	if endpointAddr != "" {
 		// Reject the endpoint if it points to the gateway handler itself.
 		sameTarget, err := sameLocalAddrs(endpointAddr, serverAddr)
@@ -148,16 +136,41 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 	// Handle common env vars.
 	handleCommonEnvVars()
 
+	// On macOS, if a process already listens on LOCALIPADDR:PORT, net.Listen() falls back
+	// to IPv6 address ie minio will start listening on IPv6 address whereas another
+	// (non-)minio process is listening on IPv4 of given port.
+	// To avoid this error situation we check for port availability.
+	logger.FatalIf(checkPortAvailability(globalMinioPort), "Unable to start the server")
+
 	// Validate if we have access, secret set through environment.
 	if !globalIsEnvCreds {
-		logger.Fatal(uiErrEnvCredentialsMissing(nil), "Unable to start gateway")
+		logger.Fatal(uiErrEnvCredentialsMissingGateway(nil), "Unable to start gateway")
 	}
 
 	// Create certs path.
 	logger.FatalIf(createConfigDir(), "Unable to create configuration directories")
 
-	// Initialize gateway config.
-	initConfig()
+	// Initialize server config.
+	srvCfg := newServerConfig()
+
+	// Override any values from ENVs.
+	srvCfg.loadFromEnvs()
+
+	// Load values to cached global values.
+	srvCfg.loadToCachedConfigs()
+
+	// hold the mutex lock before a new config is assigned.
+	globalServerConfigMu.Lock()
+	globalServerConfig = srvCfg
+	globalServerConfigMu.Unlock()
+
+	var cacheConfig = globalServerConfig.GetCacheConfig()
+	if len(cacheConfig.Drives) > 0 {
+		var err error
+		// initialize the new disk cache objects.
+		globalCacheObjectAPI, err = newServerCacheObjects(cacheConfig)
+		logger.FatalIf(err, "Unable to initialize disk caching")
+	}
 
 	// Check and load SSL certificates.
 	var err error
@@ -214,12 +227,7 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 		logger.FatalIf(err, "Unable to initialize gateway backend")
 	}
 
-	if gw.Name() != "nas" {
-		// Initialize policy sys for all gateways. NAS gateway already
-		// initializes policy sys internally, avoid double initialization.
-		// Additionally also don't block the initialization of gateway.
-		go globalPolicySys.Init(newObject)
-	}
+	go globalPolicySys.Init(newObject)
 
 	// Once endpoints are finalized, initialize the new object api.
 	globalObjLayerMutex.Lock()

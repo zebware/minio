@@ -17,7 +17,6 @@
 package rpc
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
 	"encoding/gob"
@@ -48,22 +47,25 @@ func (client *Client) Call(serviceMethod string, args, reply interface{}) error 
 		return fmt.Errorf("rpc reply must be a pointer type, but found %v", replyKind)
 	}
 
-	data, err := gobEncode(args)
-	if err != nil {
+	argBuf := bufPool.Get()
+	defer bufPool.Put(argBuf)
+
+	if err := gobEncodeBuf(args, argBuf); err != nil {
 		return err
 	}
 
 	callRequest := CallRequest{
 		Method:   serviceMethod,
-		ArgBytes: data,
+		ArgBytes: argBuf.Bytes(),
 	}
 
-	var buf bytes.Buffer
-	if err = gob.NewEncoder(&buf).Encode(callRequest); err != nil {
+	reqBuf := bufPool.Get()
+	defer bufPool.Put(reqBuf)
+	if err := gob.NewEncoder(reqBuf).Encode(callRequest); err != nil {
 		return err
 	}
 
-	response, err := client.httpClient.Post(client.serviceURL.String(), "", &buf)
+	response, err := client.httpClient.Post(client.serviceURL.String(), "", reqBuf)
 	if err != nil {
 		return err
 	}
@@ -116,11 +118,13 @@ func NewClient(serviceURL *xnet.URL, tlsConfig *tls.Config, timeout time.Duratio
 			Transport: &http.Transport{
 				Proxy:                 http.ProxyFromEnvironment,
 				DialContext:           newCustomDialContext(timeout),
-				MaxIdleConns:          100,
+				MaxIdleConnsPerHost:   4096,
+				MaxIdleConns:          4096,
 				IdleConnTimeout:       90 * time.Second,
 				TLSHandshakeTimeout:   10 * time.Second,
 				ExpectContinueTimeout: 1 * time.Second,
 				TLSClientConfig:       tlsConfig,
+				DisableCompression:    true,
 			},
 		},
 		serviceURL: serviceURL,

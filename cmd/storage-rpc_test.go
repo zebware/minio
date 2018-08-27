@@ -347,11 +347,11 @@ func testStorageAPIReadFile(t *testing.T, storage StorageAPI) {
 		{"foo", "yourobject", 0, nil, true},
 	}
 
+	result := make([]byte, 100)
 	for i, testCase := range testCases {
-		result := make([]byte, 100)
-		n, err := storage.ReadFile(testCase.volumeName, testCase.objectName, testCase.offset, result, nil)
+		result = result[testCase.offset:3]
+		_, err := storage.ReadFile(testCase.volumeName, testCase.objectName, testCase.offset, result, nil)
 		expectErr := (err != nil)
-		result = result[:n]
 
 		if expectErr != testCase.expectErr {
 			t.Fatalf("case %v: error: expected: %v, got: %v", i+1, testCase.expectErr, expectErr)

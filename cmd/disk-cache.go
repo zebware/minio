@@ -32,13 +32,9 @@ import (
 	"github.com/djherbis/atime"
 
 	"github.com/minio/minio/cmd/logger"
-	"github.com/minio/minio/pkg/wildcard"
-
 	"github.com/minio/minio/pkg/hash"
+	"github.com/minio/minio/pkg/wildcard"
 )
-
-// list of all errors that can be ignored in tree walk operation in disk cache
-var cacheTreeWalkIgnoredErrs = append(baseIgnoredErrs, errDiskAccessDenied, errVolumeNotFound, errFileNotFound)
 
 const (
 	// disk cache needs to have cacheSizeMultiplier * object size space free for a cache entry to be created.
@@ -61,6 +57,7 @@ type cacheObjects struct {
 	// file path patterns to exclude from cache
 	exclude []string
 	// Object functions pointing to the corresponding functions of backend implementation.
+	GetObjectNInfoFn          func(ctx context.Context, bucket, object string, rs *HTTPRangeSpec) (objInfo ObjectInfo, reader io.ReadCloser, err error)
 	GetObjectFn               func(ctx context.Context, bucket, object string, startOffset int64, length int64, writer io.Writer, etag string) (err error)
 	GetObjectInfoFn           func(ctx context.Context, bucket, object string) (objInfo ObjectInfo, err error)
 	PutObjectFn               func(ctx context.Context, bucket, object string, data *hash.Reader, metadata map[string]string) (objInfo ObjectInfo, err error)
@@ -92,6 +89,7 @@ type CacheObjectLayer interface {
 	ListBuckets(ctx context.Context) (buckets []BucketInfo, err error)
 	DeleteBucket(ctx context.Context, bucket string) error
 	// Object operations.
+	GetObjectNInfo(ctx context.Context, bucket, object string, rs *HTTPRangeSpec) (objInfo ObjectInfo, reader io.ReadCloser, err error)
 	GetObject(ctx context.Context, bucket, object string, startOffset int64, length int64, writer io.Writer, etag string) (err error)
 	GetObjectInfo(ctx context.Context, bucket, object string) (objInfo ObjectInfo, err error)
 	PutObject(ctx context.Context, bucket, object string, data *hash.Reader, metadata map[string]string) (objInfo ObjectInfo, err error)
@@ -177,6 +175,75 @@ func (c cacheObjects) getMetadata(objInfo ObjectInfo) map[string]string {
 		metadata[key] = val
 	}
 	return metadata
+}
+
+func (c cacheObjects) GetObjectNInfo(ctx context.Context, bucket, object string, rs *HTTPRangeSpec) (oi ObjectInfo, r io.ReadCloser, err error) {
+
+	bkObjInfo, bkReader, bkErr := c.GetObjectNInfoFn(ctx, bucket, object, rs)
+
+	if c.isCacheExclude(bucket, object) {
+		return bkObjInfo, bkReader, bkErr
+	}
+
+	// fetch cacheFSObjects if object is currently cached or nearest available cache drive
+	dcache, err := c.cache.getCachedFSLoc(ctx, bucket, object)
+	if err != nil {
+		return bkObjInfo, bkReader, bkErr
+	}
+
+	backendDown := backendDownError(bkErr)
+	if bkErr != nil && !backendDown {
+		if _, ok := err.(ObjectNotFound); ok {
+			// Delete the cached entry if backend object was deleted.
+			dcache.Delete(ctx, bucket, object)
+		}
+		return oi, r, bkErr
+	}
+
+	if !backendDown && filterFromCache(bkObjInfo.UserDefined) {
+		return bkObjInfo, bkReader, bkErr
+	}
+
+	cacheObjInfo, cacheReader, cacheErr := dcache.GetObjectNInfo(ctx, bucket, object, rs)
+	if cacheErr == nil {
+		if backendDown {
+			// If the backend is down, serve the request from cache.
+			return cacheObjInfo, cacheReader, nil
+		}
+		if cacheObjInfo.ETag == bkObjInfo.ETag && !isStaleCache(bkObjInfo) {
+			return cacheObjInfo, cacheReader, nil
+		}
+		dcache.Delete(ctx, bucket, object)
+	}
+
+	if rs != nil {
+		// We don't cache partial objects.
+		return bkObjInfo, bkReader, bkErr
+	}
+	if !dcache.diskAvailable(bkObjInfo.Size * cacheSizeMultiplier) {
+		// cache only objects < 1/100th of disk capacity
+		return bkObjInfo, bkReader, bkErr
+	}
+
+	// Initialize pipe.
+	pipeReader, pipeWriter := io.Pipe()
+	teeReader := io.TeeReader(bkReader, pipeWriter)
+	hashReader, herr := hash.NewReader(pipeReader, bkObjInfo.Size, "", "")
+	if err != nil {
+		return oi, r, herr
+	}
+
+	cleanupBackend := func() { bkReader.Close() }
+	getObjReader := NewGetObjectReader(teeReader, nil, cleanupBackend)
+
+	go func() {
+		putErr := dcache.Put(ctx, bucket, object, hashReader, c.getMetadata(bkObjInfo))
+		// close the write end of the pipe, so the error gets
+		// propagated to getObjReader
+		pipeWriter.CloseWithError(putErr)
+	}()
+
+	return bkObjInfo, getObjReader, nil
 }
 
 // Uses cached-object to serve the request. If object is not cached it serves the request from the backend and also
@@ -291,40 +358,32 @@ func (c cacheObjects) GetObjectInfo(ctx context.Context, bucket, object string) 
 // Returns function "listDir" of the type listDirFunc.
 // isLeaf - is used by listDir function to check if an entry is a leaf or non-leaf entry.
 // disks - list of fsObjects
-func listDirCacheFactory(isLeaf isLeafFunc, treeWalkIgnoredErrs []error, disks []*cacheFSObjects) listDirFunc {
-	listCacheDirs := func(bucket, prefixDir, prefixEntry string) (dirs []string, err error) {
+func listDirCacheFactory(isLeaf isLeafFunc, disks []*cacheFSObjects) listDirFunc {
+	listCacheDirs := func(bucket, prefixDir, prefixEntry string) (dirs []string) {
 		var entries []string
 		for _, disk := range disks {
 			// ignore disk-caches that might be missing/offline
 			if disk == nil {
 				continue
 			}
-			fs := disk.FSObjects
-			entries, err = readDir(pathJoin(fs.fsPath, bucket, prefixDir))
 
-			// For any reason disk was deleted or goes offline, continue
-			// and list from other disks if possible.
+			fs := disk.FSObjects
+			var err error
+			entries, err = readDir(pathJoin(fs.fsPath, bucket, prefixDir))
 			if err != nil {
-				if IsErrIgnored(err, treeWalkIgnoredErrs...) {
-					continue
-				}
-				return nil, err
+				continue
 			}
 
 			// Filter entries that have the prefix prefixEntry.
 			entries = filterMatchingPrefix(entries, prefixEntry)
 			dirs = append(dirs, entries...)
 		}
-		return dirs, nil
+		return dirs
 	}
 
 	// listDir - lists all the entries at a given prefix and given entry in the prefix.
-	listDir := func(bucket, prefixDir, prefixEntry string) (mergedEntries []string, delayIsLeaf bool, err error) {
-		var cacheEntries []string
-		cacheEntries, err = listCacheDirs(bucket, prefixDir, prefixEntry)
-		if err != nil {
-			return nil, false, err
-		}
+	listDir := func(bucket, prefixDir, prefixEntry string) (mergedEntries []string, delayIsLeaf bool) {
+		cacheEntries := listCacheDirs(bucket, prefixDir, prefixEntry)
 		for _, entry := range cacheEntries {
 			// Find elements in entries which are not in mergedEntries
 			idx := sort.SearchStrings(mergedEntries, entry)
@@ -335,7 +394,7 @@ func listDirCacheFactory(isLeaf isLeafFunc, treeWalkIgnoredErrs []error, disks [
 			mergedEntries = append(mergedEntries, entry)
 			sort.Strings(mergedEntries)
 		}
-		return mergedEntries, false, nil
+		return mergedEntries, false
 	}
 	return listDir
 }
@@ -371,7 +430,7 @@ func (c cacheObjects) listCacheObjects(ctx context.Context, bucket, prefix, mark
 			return fs.isObjectDir(bucket, object)
 		}
 
-		listDir := listDirCacheFactory(isLeaf, cacheTreeWalkIgnoredErrs, c.cache.cfs)
+		listDir := listDirCacheFactory(isLeaf, c.cache.cfs)
 		walkResultCh = startTreeWalk(ctx, bucket, prefix, marker, recursive, listDir, isLeaf, isLeafDir, endWalkCh)
 	}
 

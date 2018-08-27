@@ -19,7 +19,6 @@ package sia
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -40,6 +39,7 @@ import (
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/hash"
+	"github.com/minio/sha256-simd"
 )
 
 const (
@@ -429,6 +429,27 @@ func (s *siaObjects) ListObjects(ctx context.Context, bucket string, prefix stri
 		}
 	}
 	return loi, nil
+}
+
+func (s *siaObjects) GetObjectNInfo(ctx context.Context, bucket, object string, rs *minio.HTTPRangeSpec) (objInfo minio.ObjectInfo, reader io.ReadCloser, err error) {
+	objInfo, err = s.GetObjectInfo(ctx, bucket, object)
+	if err != nil {
+		return objInfo, reader, err
+	}
+
+	startOffset, length := int64(0), objInfo.Size
+	if rs != nil {
+		startOffset, length = rs.GetOffsetLength(objInfo.Size)
+	}
+
+	pr, pw := io.Pipe()
+	objReader := minio.NewGetObjectReader(pr, nil, nil)
+	go func() {
+		err := s.GetObject(ctx, bucket, object, startOffset, length, pw, objInfo.ETag)
+		pw.CloseWithError(err)
+	}()
+
+	return objInfo, objReader, nil
 }
 
 func (s *siaObjects) GetObject(ctx context.Context, bucket string, object string, startOffset int64, length int64, writer io.Writer, etag string) error {

@@ -19,7 +19,6 @@ package cmd
 import (
 	"context"
 	"io"
-	"time"
 
 	"github.com/minio/minio/pkg/hash"
 	"github.com/minio/minio/pkg/madmin"
@@ -57,6 +56,10 @@ func (api *DummyObjectLayer) ListObjects(ctx context.Context, bucket, prefix, ma
 }
 
 func (api *DummyObjectLayer) ListObjectsV2(ctx context.Context, bucket, prefix, continuationToken, delimiter string, maxKeys int, fetchOwner bool, startAfter string) (result ListObjectsV2Info, err error) {
+	return
+}
+
+func (api *DummyObjectLayer) GetObjectNInfo(ctx context.Context, bucket, object string, rs *HTTPRangeSpec) (objInfo ObjectInfo, reader io.ReadCloser, err error) {
 	return
 }
 
@@ -129,14 +132,6 @@ func (api *DummyObjectLayer) ListBucketsHeal(ctx context.Context) (buckets []Buc
 }
 
 func (api *DummyObjectLayer) ListObjectsHeal(ctx context.Context, bucket, prefix, marker, delimiter string, maxKeys int) (info ListObjectsInfo, err error) {
-	return
-}
-
-func (api *DummyObjectLayer) ListLocks(ctx context.Context, bucket, prefix string, duration time.Duration) (info []VolumeLockInfo, err error) {
-	return
-}
-
-func (api *DummyObjectLayer) ClearLocks(context.Context, []VolumeLockInfo) (err error) {
 	return
 }
 

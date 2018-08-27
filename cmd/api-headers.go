@@ -34,8 +34,6 @@ func mustGetRequestID(t time.Time) string {
 
 // Write http common headers
 func setCommonHeaders(w http.ResponseWriter) {
-	// Set unique request ID for each reply.
-	w.Header().Set(responseRequestIDKey, mustGetRequestID(UTCNow()))
 	w.Header().Set("Server", globalServerUserAgent)
 	// Set `x-amz-bucket-region` only if region is set on the server
 	// by default minio uses an empty region.
@@ -63,7 +61,7 @@ func encodeResponseJSON(response interface{}) []byte {
 }
 
 // Write object header
-func setObjectHeaders(w http.ResponseWriter, objInfo ObjectInfo, contentRange *httpRange) {
+func setObjectHeaders(w http.ResponseWriter, objInfo ObjectInfo, rs *HTTPRangeSpec) {
 	// set common headers
 	setCommonHeaders(w)
 
@@ -98,10 +96,9 @@ func setObjectHeaders(w http.ResponseWriter, objInfo ObjectInfo, contentRange *h
 	}
 
 	// for providing ranged content
-	if contentRange != nil && contentRange.offsetBegin > -1 {
+	if rs != nil {
 		// Override content-length
-		w.Header().Set("Content-Length", strconv.FormatInt(contentRange.getLength(), 10))
-		w.Header().Set("Content-Range", contentRange.String())
-		w.WriteHeader(http.StatusPartialContent)
+		w.Header().Set("Content-Length", strconv.FormatInt(rs.GetLength(objInfo.Size), 10))
+		w.Header().Set("Content-Range", rs.ContentRangeString(objInfo.Size))
 	}
 }

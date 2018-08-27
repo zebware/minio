@@ -19,14 +19,20 @@ package cmd
 var (
 	uiErrInvalidConfig = newUIErrFn(
 		"Invalid value found in the configuration file",
-		"Please ensure a valid value in the configuration file, for more details refer https://docs.minio.io/docs/minio-server-configuration-guide",
-		"",
+		"Please ensure a valid value in the configuration file",
+		"For more details, refer to https://docs.minio.io/docs/minio-server-configuration-guide",
 	)
 
 	uiErrInvalidBrowserValue = newUIErrFn(
 		"Invalid browser value",
 		"Please check the passed value",
 		"Browser can only accept `on` and `off` values. To disable web browser access, set this value to `off`",
+	)
+
+	uiErrInvalidErasureSetSize = newUIErrFn(
+		"Invalid erasure set size",
+		"Please check the passed value",
+		"Erasure set can only accept any of [4, 6, 8, 10, 12, 14, 16] values.",
 	)
 
 	uiErrInvalidWormValue = newUIErrFn(
@@ -66,10 +72,16 @@ var (
 Secret key should be in between 8 and 40 characters.`,
 	)
 
-	uiErrEnvCredentialsMissing = newUIErrFn(
+	uiErrEnvCredentialsMissingGateway = newUIErrFn(
 		"Credentials missing",
 		"Please provide correct credentials",
 		`Access key and Secret key should be specified in Gateway mode from environment variables MINIO_ACCESS_KEY and MINIO_SECRET_KEY respectively.`,
+	)
+
+	uiErrEnvCredentialsMissingServer = newUIErrFn(
+		"Credentials missing",
+		"Please provide correct credentials",
+		`Access key and Secret key should be specified in distributed server mode from environment variables MINIO_ACCESS_KEY and MINIO_SECRET_KEY respectively.`,
 	)
 
 	uiErrInvalidErasureEndpoints = newUIErrFn(
@@ -117,12 +129,6 @@ Example 1:
 	uiErrUnableToWriteInBackend = newUIErrFn(
 		"Unable to write to the backend",
 		"Please ensure Minio binary has write permissions for the backend",
-		"",
-	)
-
-	uiErrUnableToReadFromBackend = newUIErrFn(
-		"Unable to read from the backend",
-		"Please ensure Minio binary has read permissions for the backend",
 		"",
 	)
 

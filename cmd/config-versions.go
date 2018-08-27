@@ -19,6 +19,7 @@ package cmd
 import (
 	"sync"
 
+	"github.com/minio/minio/cmd/crypto"
 	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/event/target"
 	"github.com/minio/minio/pkg/quick"
@@ -657,9 +658,6 @@ type serverConfigV25 struct {
 
 // serverConfigV26 is just like version '25', stores additionally
 // cache max use value in 'CacheConfig'.
-//
-// IMPORTANT NOTE: When updating this struct make sure that
-// serverConfig.ConfigDiff() is updated as necessary.
 type serverConfigV26 struct {
 	quick.Config `json:"-"` // ignore interfaces
 
@@ -680,4 +678,81 @@ type serverConfigV26 struct {
 
 	// Notification queue configuration.
 	Notify notifier `json:"notify"`
+}
+
+type loggerConsole struct {
+	Enabled bool `json:"enabled"`
+}
+
+type loggerHTTP struct {
+	Enabled  bool   `json:"enabled"`
+	Endpoint string `json:"endpoint"`
+}
+
+type loggerConfig struct {
+	Console loggerConsole         `json:"console"`
+	HTTP    map[string]loggerHTTP `json:"http"`
+}
+
+// serverConfigV27 is just like version '26', stores additionally
+// the logger field
+//
+// IMPORTANT NOTE: When updating this struct make sure that
+// serverConfig.ConfigDiff() is updated as necessary.
+type serverConfigV27 struct {
+	quick.Config `json:"-"` // ignore interfaces
+
+	Version string `json:"version"`
+
+	// S3 API configuration.
+	Credential auth.Credentials `json:"credential"`
+	Region     string           `json:"region"`
+	Browser    BoolFlag         `json:"browser"`
+	Worm       BoolFlag         `json:"worm"`
+	Domain     string           `json:"domain"`
+
+	// Storage class configuration
+	StorageClass storageClassConfig `json:"storageclass"`
+
+	// Cache configuration
+	Cache CacheConfig `json:"cache"`
+
+	// Notification queue configuration.
+	Notify notifier `json:"notify"`
+
+	// Logger configuration
+	Logger loggerConfig `json:"logger"`
+}
+
+// serverConfigV28 is just like version '27', additionally
+// storing KMS config
+//
+// IMPORTANT NOTE: When updating this struct make sure that
+// serverConfig.ConfigDiff() is updated as necessary.
+type serverConfigV28 struct {
+	quick.Config `json:"-"` // ignore interfaces
+
+	Version string `json:"version"`
+
+	// S3 API configuration.
+	Credential auth.Credentials `json:"credential"`
+	Region     string           `json:"region"`
+	Browser    BoolFlag         `json:"browser"`
+	Worm       BoolFlag         `json:"worm"`
+	Domain     string           `json:"domain"`
+
+	// Storage class configuration
+	StorageClass storageClassConfig `json:"storageclass"`
+
+	// Cache configuration
+	Cache CacheConfig `json:"cache"`
+
+	// KMS configuration
+	KMS crypto.KMSConfig `json:"kms"`
+
+	// Notification queue configuration.
+	Notify notifier `json:"notify"`
+
+	// Logger configuration
+	Logger loggerConfig `json:"logger"`
 }

@@ -20,6 +20,8 @@ import (
 	"net/http"
 
 	"github.com/gorilla/mux"
+	"github.com/minio/minio/cmd/crypto"
+
 	"github.com/minio/minio/pkg/policy"
 )
 
@@ -54,7 +56,7 @@ func validateListObjectsArgs(prefix, marker, delimiter string, maxKeys int) APIE
 // NOTE: It is recommended that this API to be used for application development.
 // Minio continues to support ListObjectsV1 for supporting legacy tools.
 func (api objectAPIHandlers) ListObjectsV2Handler(w http.ResponseWriter, r *http.Request) {
-	ctx := newContext(r, "ListObjectsV2")
+	ctx := newContext(r, w, "ListObjectsV2")
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -100,7 +102,7 @@ func (api objectAPIHandlers) ListObjectsV2Handler(w http.ResponseWriter, r *http
 	}
 
 	for i := range listObjectsV2Info.Objects {
-		if listObjectsV2Info.Objects[i].IsEncrypted() {
+		if crypto.IsEncrypted(listObjectsV2Info.Objects[i].UserDefined) {
 			listObjectsV2Info.Objects[i].Size, err = listObjectsV2Info.Objects[i].DecryptedSize()
 			if err != nil {
 				writeErrorResponse(w, toAPIErrorCode(err), r.URL)
@@ -123,7 +125,7 @@ func (api objectAPIHandlers) ListObjectsV2Handler(w http.ResponseWriter, r *http
 // criteria to return a subset of the objects in a bucket.
 //
 func (api objectAPIHandlers) ListObjectsV1Handler(w http.ResponseWriter, r *http.Request) {
-	ctx := newContext(r, "ListObjectsV1")
+	ctx := newContext(r, w, "ListObjectsV1")
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -166,7 +168,7 @@ func (api objectAPIHandlers) ListObjectsV1Handler(w http.ResponseWriter, r *http
 	}
 
 	for i := range listObjectsInfo.Objects {
-		if listObjectsInfo.Objects[i].IsEncrypted() {
+		if crypto.IsEncrypted(listObjectsInfo.Objects[i].UserDefined) {
 			listObjectsInfo.Objects[i].Size, err = listObjectsInfo.Objects[i].DecryptedSize()
 			if err != nil {
 				writeErrorResponse(w, toAPIErrorCode(err), r.URL)

@@ -28,7 +28,6 @@ import (
 	"time"
 
 	c "github.com/minio/mc/pkg/console"
-	"golang.org/x/crypto/ssh/terminal"
 )
 
 // Disable disables all logging, false by default. (used for "go test")
@@ -47,6 +46,11 @@ const (
 )
 
 const loggerTimeFormat string = "15:04:05 MST 01/02/2006"
+
+// List of error strings to be ignored by LogIf
+const (
+	diskNotFoundError = "disk not found"
+)
 
 var matchingFuncNames = [...]string{
 	"http.HandlerFunc.ServeHTTP",
@@ -95,13 +99,14 @@ type Console interface {
 }
 
 func consoleLog(console Console, msg string, args ...interface{}) {
-	if jsonFlag {
+	switch {
+	case jsonFlag:
 		// Strip escape control characters from json message
 		msg = ansiRE.ReplaceAllLiteralString(msg, "")
 		console.json(msg, args...)
-	} else if quiet {
+	case quiet:
 		console.quiet(msg, args...)
-	} else {
+	default:
 		console.pretty(msg, args...)
 	}
 }
@@ -267,14 +272,33 @@ func getTrace(traceLevel int) []string {
 	return trace
 }
 
-// LogIf prints a detailed error message during
+// LogAlwaysIf prints a detailed error message during
 // the execution of the server.
-func LogIf(ctx context.Context, err error) {
-	if Disable {
+func LogAlwaysIf(ctx context.Context, err error) {
+	if err == nil {
 		return
 	}
 
+	logIf(ctx, err)
+}
+
+// LogIf prints a detailed error message during
+// the execution of the server, if it is not an
+// ignored error.
+func LogIf(ctx context.Context, err error) {
 	if err == nil {
+		return
+	}
+
+	if err.Error() != diskNotFoundError {
+		logIf(ctx, err)
+	}
+}
+
+// logIf prints a detailed error message during
+// the execution of the server.
+func logIf(ctx context.Context, err error) {
+	if Disable {
 		return
 	}
 
@@ -300,74 +324,21 @@ func LogIf(ctx context.Context, err error) {
 	// Get the cause for the Error
 	message := err.Error()
 
-	// Output the formatted log message at console
-	var output string
-	if jsonFlag {
-		logJSON, err := json.Marshal(&logEntry{
-			Level:      ErrorLvl.String(),
-			RemoteHost: req.RemoteHost,
-			RequestID:  req.RequestID,
-			UserAgent:  req.UserAgent,
-			Time:       time.Now().UTC().Format(time.RFC3339Nano),
-			API:        &api{Name: API, Args: &args{Bucket: req.BucketName, Object: req.ObjectName}},
-			Trace:      &traceEntry{Message: message, Source: trace, Variables: tags},
-		})
-		if err != nil {
-			panic(err)
-		}
-		output = string(logJSON)
-	} else {
-		// Add a sequence number and formatting for each stack trace
-		// No formatting is required for the first entry
-		for i, element := range trace {
-			trace[i] = fmt.Sprintf("%8v: %s", i+1, element)
-		}
-
-		tagString := ""
-		for key, value := range tags {
-			if value != "" {
-				if tagString != "" {
-					tagString += ", "
-				}
-				tagString += key + "=" + value
-			}
-		}
-
-		apiString := "API: " + API + "("
-		if req.BucketName != "" {
-			apiString = apiString + "bucket=" + req.BucketName
-		}
-		if req.ObjectName != "" {
-			apiString = apiString + ", object=" + req.ObjectName
-		}
-		apiString += ")"
-		timeString := "Time: " + time.Now().Format(loggerTimeFormat)
-
-		var requestID string
-		if req.RequestID != "" {
-			requestID = "\nRequestID: " + req.RequestID
-		}
-
-		var remoteHost string
-		if req.RemoteHost != "" {
-			remoteHost = "\nRemoteHost: " + req.RemoteHost
-		}
-
-		var userAgent string
-		if req.UserAgent != "" {
-			userAgent = "\nUserAgent: " + req.UserAgent
-		}
-
-		if len(tags) > 0 {
-			tagString = "\n       " + tagString
-		}
-
-		var msg = colorFgRed(colorBold(message))
-		output = fmt.Sprintf("\n%s\n%s%s%s%s\nError: %s%s\n%s",
-			apiString, timeString, requestID, remoteHost, userAgent,
-			msg, tagString, strings.Join(trace, "\n"))
+	entry := logEntry{
+		DeploymentID: deploymentID,
+		Level:        ErrorLvl.String(),
+		RemoteHost:   req.RemoteHost,
+		RequestID:    req.RequestID,
+		UserAgent:    req.UserAgent,
+		Time:         time.Now().UTC().Format(time.RFC3339Nano),
+		API:          &api{Name: API, Args: &args{Bucket: req.BucketName, Object: req.ObjectName}},
+		Trace:        &traceEntry{Message: message, Source: trace, Variables: tags},
 	}
-	fmt.Println(output)
+
+	// Iterate over all logger targets to send the log entry
+	for _, t := range Targets {
+		t.send(entry)
+	}
 }
 
 // ErrCritical is the value panic'd whenever CriticalIf is called.
@@ -431,23 +402,15 @@ func (f fatalMsg) quiet(msg string, args ...interface{}) {
 }
 
 var (
-	logTag       = "ERROR"
-	logBanner    = colorBgRed(colorFgWhite(colorBold(logTag))) + " "
-	emptyBanner  = colorBgRed(strings.Repeat(" ", len(logTag))) + " "
-	minimumWidth = 80
-	bannerWidth  = len(logTag) + 1
+	logTag      = "ERROR"
+	logBanner   = colorBgRed(colorFgWhite(colorBold(logTag))) + " "
+	emptyBanner = colorBgRed(strings.Repeat(" ", len(logTag))) + " "
+	bannerWidth = len(logTag) + 1
 )
 
 func (f fatalMsg) pretty(msg string, args ...interface{}) {
 	// Build the passed error message
 	errMsg := fmt.Sprintf(msg, args...)
-	// Check terminal width
-	termWidth, _, err := terminal.GetSize(0)
-	if err != nil || termWidth < minimumWidth {
-		termWidth = minimumWidth
-	}
-	// Calculate available widht without the banner
-	width := termWidth - bannerWidth
 
 	tagPrinted := false
 
@@ -478,13 +441,8 @@ func (f fatalMsg) pretty(msg string, args ...interface{}) {
 			ansiRestoreAttributes()
 			ansiMoveRight(bannerWidth)
 			// Continue  error message printing
-			if len(line) > width {
-				fmt.Println(line[:width])
-				line = line[width:]
-			} else {
-				fmt.Println(line)
-				break
-			}
+			fmt.Println(line)
+			break
 		}
 	}
 

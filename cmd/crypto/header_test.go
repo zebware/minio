@@ -19,14 +19,49 @@ import (
 	"testing"
 )
 
+var kmsIsRequestedTests = []struct {
+	Header   http.Header
+	Expected bool
+}{
+	{Header: http.Header{}, Expected: false},                                                                                     // 0
+	{Header: http.Header{"X-Amz-Server-Side-Encryption": []string{"aws:kms"}}, Expected: true},                                   // 1
+	{Header: http.Header{"X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id": []string{"0839-9047947-844842874-481"}}, Expected: true}, // 2
+	{Header: http.Header{"X-Amz-Server-Side-Encryption-Context": []string{"7PpPLAK26ONlVUGOWlusfg=="}}, Expected: true},          // 3
+	{
+		Header: http.Header{
+			"X-Amz-Server-Side-Encryption":                []string{""},
+			"X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id": []string{""},
+			"X-Amz-Server-Side-Encryption-Context":        []string{""},
+		},
+		Expected: true,
+	}, // 4
+	{
+		Header: http.Header{
+			"X-Amz-Server-Side-Encryption":                []string{"AES256"},
+			"X-Amz-Server-Side-Encryption-Aws-Kms-Key-Id": []string{""},
+		},
+		Expected: true,
+	}, // 5
+	{Header: http.Header{"X-Amz-Server-Side-Encryption": []string{"AES256"}}, Expected: false}, // 6
+}
+
+func TestKMSIsRequested(t *testing.T) {
+	for i, test := range kmsIsRequestedTests {
+		if got := S3KMS.IsRequested(test.Header); got != test.Expected {
+			t.Errorf("Test %d: Wanted %v but got %v", i, test.Expected, got)
+		}
+	}
+}
+
 var s3IsRequestedTests = []struct {
 	Header   http.Header
 	Expected bool
 }{
-	{Header: http.Header{"X-Amz-Server-Side-Encryption": []string{"AES256"}}, Expected: true},  // 0
-	{Header: http.Header{"X-Amz-Server-Side-Encryption": []string{"AES-256"}}, Expected: true}, // 1
-	{Header: http.Header{"X-Amz-Server-Side-Encryption": []string{""}}, Expected: true},        // 2
-	{Header: http.Header{"X-Amz-Server-Side-Encryptio": []string{"AES256"}}, Expected: false},  // 3
+	{Header: http.Header{"X-Amz-Server-Side-Encryption": []string{"AES256"}}, Expected: true},         // 0
+	{Header: http.Header{"X-Amz-Server-Side-Encryption": []string{"AES-256"}}, Expected: true},        // 1
+	{Header: http.Header{"X-Amz-Server-Side-Encryption": []string{""}}, Expected: true},               // 2
+	{Header: http.Header{"X-Amz-Server-Side-Encryptio": []string{"AES256"}}, Expected: false},         // 3
+	{Header: http.Header{"X-Amz-Server-Side-Encryption": []string{SSEAlgorithmKMS}}, Expected: false}, // 4
 }
 
 func TestS3IsRequested(t *testing.T) {
@@ -49,7 +84,7 @@ var s3ParseTests = []struct {
 
 func TestS3Parse(t *testing.T) {
 	for i, test := range s3ParseTests {
-		if err := S3.Parse(test.Header); err != test.ExpectedErr {
+		if err := S3.ParseHTTP(test.Header); err != test.ExpectedErr {
 			t.Errorf("Test %d: Wanted '%v' but got '%v'", i, test.ExpectedErr, err)
 		}
 	}
@@ -204,7 +239,7 @@ var ssecParseTests = []struct {
 func TestSSECParse(t *testing.T) {
 	var zeroKey [32]byte
 	for i, test := range ssecParseTests {
-		key, err := SSEC.Parse(test.Header)
+		key, err := SSEC.ParseHTTP(test.Header)
 		if err != test.ExpectedErr {
 			t.Errorf("Test %d: want error '%v' but got '%v'", i, test.ExpectedErr, err)
 		}
@@ -286,7 +321,7 @@ var ssecCopyParseTests = []struct {
 func TestSSECopyParse(t *testing.T) {
 	var zeroKey [32]byte
 	for i, test := range ssecCopyParseTests {
-		key, err := SSECopy.Parse(test.Header)
+		key, err := SSECopy.ParseHTTP(test.Header)
 		if err != test.ExpectedErr {
 			t.Errorf("Test %d: want error '%v' but got '%v'", i, test.ExpectedErr, err)
 		}

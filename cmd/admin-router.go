@@ -53,13 +53,6 @@ func registerAdminRouter(router *mux.Router) {
 	// Info operations
 	adminV1Router.Methods(http.MethodGet).Path("/info").HandlerFunc(httpTraceAll(adminAPI.ServerInfoHandler))
 
-	/// Lock operations
-
-	// List Locks
-	adminV1Router.Methods(http.MethodGet).Path("/locks").HandlerFunc(httpTraceAll(adminAPI.ListLocksHandler))
-	// Clear locks
-	adminV1Router.Methods(http.MethodDelete).Path("/locks").HandlerFunc(httpTraceAll(adminAPI.ClearLocksHandler))
-
 	/// Heal operations
 
 	// Heal processing endpoint.
@@ -70,9 +63,9 @@ func registerAdminRouter(router *mux.Router) {
 	/// Config operations
 
 	// Update credentials
-	adminV1Router.Methods(http.MethodPut).Path("/config/credential").HandlerFunc(httpTraceAll(adminAPI.UpdateCredentialsHandler))
+	adminV1Router.Methods(http.MethodPut).Path("/config/credential").HandlerFunc(httpTraceHdrs(adminAPI.UpdateCredentialsHandler))
 	// Get config
-	adminV1Router.Methods(http.MethodGet).Path("/config").HandlerFunc(httpTraceAll(adminAPI.GetConfigHandler))
+	adminV1Router.Methods(http.MethodGet).Path("/config").HandlerFunc(httpTraceHdrs(adminAPI.GetConfigHandler))
 	// Set config
-	adminV1Router.Methods(http.MethodPut).Path("/config").HandlerFunc(httpTraceAll(adminAPI.SetConfigHandler))
+	adminV1Router.Methods(http.MethodPut).Path("/config").HandlerFunc(httpTraceHdrs(adminAPI.SetConfigHandler))
 }

@@ -17,9 +17,8 @@
 package cmd
 
 import (
-	"io/ioutil"
 	"os"
-	"path/filepath"
+	"path"
 	"testing"
 
 	"github.com/minio/minio/pkg/auth"
@@ -27,12 +26,15 @@ import (
 )
 
 func TestServerConfig(t *testing.T) {
-	rootPath, err := newTestConfig(globalMinioDefaultRegion)
+	objLayer, fsDir, err := prepareFS()
 	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(fsDir)
+
+	if err = newTestConfig(globalMinioDefaultRegion, objLayer); err != nil {
 		t.Fatalf("Init Test config failed")
 	}
-	// remove the root directory after the test ends.
-	defer os.RemoveAll(rootPath)
 
 	if globalServerConfig.GetRegion() != globalMinioDefaultRegion {
 		t.Errorf("Expecting region `us-east-1` found %s", globalServerConfig.GetRegion())
@@ -49,16 +51,12 @@ func TestServerConfig(t *testing.T) {
 		t.Errorf("Expecting version %s found %s", globalServerConfig.GetVersion(), serverConfigVersion)
 	}
 
-	// Attempt to save.
-	if err := globalServerConfig.Save(getConfigFile()); err != nil {
+	if err := saveServerConfig(objLayer, globalServerConfig); err != nil {
 		t.Fatalf("Unable to save updated config file %s", err)
 	}
 
-	// Do this only once here.
-	setConfigDir(rootPath)
-
 	// Initialize server config.
-	if err := loadConfig(); err != nil {
+	if err := loadConfig(objLayer); err != nil {
 		t.Fatalf("Unable to initialize from updated config file %s", err)
 	}
 }
@@ -67,6 +65,9 @@ func TestServerConfigWithEnvs(t *testing.T) {
 
 	os.Setenv("MINIO_BROWSER", "off")
 	defer os.Unsetenv("MINIO_BROWSER")
+
+	os.Setenv("MINIO_WORM", "on")
+	defer os.Unsetenv("MINIO_WORM")
 
 	os.Setenv("MINIO_ACCESS_KEY", "minio")
 	defer os.Unsetenv("MINIO_ACCESS_KEY")
@@ -82,61 +83,70 @@ func TestServerConfigWithEnvs(t *testing.T) {
 
 	defer resetGlobalIsEnvs()
 
-	// Get test root.
-	rootPath, err := getTestRoot()
+	objLayer, fsDir, err := prepareFS()
 	if err != nil {
-		t.Error(err)
+		t.Fatal(err)
 	}
+	defer os.RemoveAll(fsDir)
+
+	if err = newTestConfig(globalMinioDefaultRegion, objLayer); err != nil {
+		t.Fatalf("Init Test config failed")
+	}
+
+	globalObjLayerMutex.Lock()
+	globalObjectAPI = objLayer
+	globalObjLayerMutex.Unlock()
 
 	serverHandleEnvVars()
 
-	// Do this only once here.
-	setConfigDir(rootPath)
-
 	// Init config
-	initConfig()
+	initConfig(objLayer)
 
-	// remove the root directory after the test ends.
-	defer os.RemoveAll(rootPath)
-
-	// Check if serverConfig has
+	// Check if serverConfig has browser disabled
 	if globalServerConfig.GetBrowser() {
-		t.Errorf("Expecting browser is set to false found %v", globalServerConfig.GetBrowser())
+		t.Error("Expected browser to be disabled but it is not")
 	}
 
-	// Check if serverConfig has
+	// Check if serverConfig returns WORM config from the env
+	if !globalServerConfig.GetWorm() {
+		t.Error("Expected WORM to be enabled but it is not")
+	}
+
+	// Check if serverConfig has region from the environment
 	if globalServerConfig.GetRegion() != "us-west-1" {
-		t.Errorf("Expecting region to be \"us-west-1\" found %v", globalServerConfig.GetRegion())
+		t.Errorf("Expected region to be \"us-west-1\", found %v", globalServerConfig.GetRegion())
 	}
 
-	// Check if serverConfig has
+	// Check if serverConfig has credentials from the environment
 	cred := globalServerConfig.GetCredential()
 
 	if cred.AccessKey != "minio" {
-		t.Errorf("Expecting access key to be `minio` found %s", cred.AccessKey)
+		t.Errorf("Expected access key to be `minio`, found %s", cred.AccessKey)
 	}
 
 	if cred.SecretKey != "minio123" {
-		t.Errorf("Expecting access key to be `minio123` found %s", cred.SecretKey)
+		t.Errorf("Expected access key to be `minio123`, found %s", cred.SecretKey)
 	}
 
+	// Check if serverConfig has the correct domain
 	if globalServerConfig.Domain != "domain.com" {
-		t.Errorf("Expecting Domain to be `domain.com` found " + globalServerConfig.Domain)
+		t.Errorf("Expected Domain to be `domain.com`, found " + globalServerConfig.Domain)
 	}
 }
 
 // Tests config validator..
 func TestValidateConfig(t *testing.T) {
-	rootPath, err := newTestConfig(globalMinioDefaultRegion)
+	objLayer, fsDir, err := prepareFS()
 	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.RemoveAll(fsDir)
+
+	if err = newTestConfig(globalMinioDefaultRegion, objLayer); err != nil {
 		t.Fatalf("Init Test config failed")
 	}
 
-	// remove the root directory after the test ends.
-	defer os.RemoveAll(rootPath)
-
-	configPath := filepath.Join(rootPath, minioConfigFile)
-
+	configPath := path.Join(minioConfigPrefix, minioConfigFile)
 	v := serverConfigVersion
 
 	testCases := []struct {
@@ -226,14 +236,14 @@ func TestValidateConfig(t *testing.T) {
 	}
 
 	for i, testCase := range testCases {
-		if werr := ioutil.WriteFile(configPath, []byte(testCase.configData), 0700); werr != nil {
-			t.Fatal(werr)
+		if err = saveConfig(objLayer, configPath, []byte(testCase.configData)); err != nil {
+			t.Fatal(err)
 		}
-		_, verr := getValidConfig()
-		if testCase.shouldPass && verr != nil {
-			t.Errorf("Test %d, should pass but it failed with err = %v", i+1, verr)
+		_, err = getValidConfig(objLayer)
+		if testCase.shouldPass && err != nil {
+			t.Errorf("Test %d, should pass but it failed with err = %v", i+1, err)
 		}
-		if !testCase.shouldPass && verr == nil {
+		if !testCase.shouldPass && err == nil {
 			t.Errorf("Test %d, should fail but it succeeded.", i+1)
 		}
 	}
@@ -318,6 +328,18 @@ func TestConfigDiff(t *testing.T) {
 			&serverConfig{Notify: notifier{MQTT: map[string]target.MQTTArgs{"1": {Enable: true}}}},
 			&serverConfig{Notify: notifier{MQTT: map[string]target.MQTTArgs{"1": {Enable: false}}}},
 			"MQTT Notification configuration differs",
+		},
+		// 16
+		{
+			&serverConfig{Logger: loggerConfig{
+				Console: loggerConsole{Enabled: true},
+				HTTP:    map[string]loggerHTTP{"1": {Endpoint: "http://address1"}},
+			}},
+			&serverConfig{Logger: loggerConfig{
+				Console: loggerConsole{Enabled: true},
+				HTTP:    map[string]loggerHTTP{"1": {Endpoint: "http://address2"}},
+			}},
+			"Logger configuration differs",
 		},
 	}
 

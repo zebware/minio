@@ -17,7 +17,6 @@
 package cmd
 
 import (
-	"context"
 	"errors"
 	"net"
 	"os"
@@ -27,8 +26,8 @@ import (
 	"time"
 
 	etcd "github.com/coreos/etcd/clientv3"
-
 	"github.com/minio/cli"
+	"github.com/minio/minio/cmd/crypto"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/dns"
@@ -48,36 +47,17 @@ func checkUpdate(mode string) {
 	}
 }
 
-// Initialize and load config from remote etcd or local config directory
-func initConfig() {
-	if globalEtcdClient != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		resp, err := globalEtcdClient.Get(ctx, getConfigFile())
-		cancel()
-		// This means there are no entries in etcd with config file
-		// So create a new config
-		if err == nil && resp.Count == 0 {
-			logger.FatalIf(newConfig(), "Unable to initialize minio config for the first time.")
-			logger.Info("Created minio configuration file successfully at %v", globalEtcdClient.Endpoints())
-		} else {
-			// This means there is an entry in etcd, update it if required and proceed
-			if err == nil && resp.Count > 0 {
-				logger.FatalIf(migrateConfig(), "Config migration failed.")
-				logger.FatalIf(loadConfig(), "Unable to load config version: '%s'.", serverConfigVersion)
-			} else {
-				logger.FatalIf(err, "Unable to load config version: '%s'.", serverConfigVersion)
-			}
-		}
-		return
+// Load logger targets based on user's configuration
+func loadLoggers() {
+	if globalServerConfig.Logger.Console.Enabled {
+		// Enable console logging
+		logger.AddTarget(logger.NewConsole())
 	}
-
-	if isFile(getConfigFile()) {
-		logger.FatalIf(migrateConfig(), "Config migration failed")
-		logger.FatalIf(loadConfig(), "Unable to load the configuration file")
-	} else {
-		// Config file does not exist, we create it fresh and return upon success.
-		logger.FatalIf(newConfig(), "Unable to initialize minio config for the first time")
-		logger.Info("Created minio configuration file successfully at " + getConfigDir())
+	for _, l := range globalServerConfig.Logger.HTTP {
+		if l.Enabled {
+			// Enable http logging
+			logger.AddTarget(logger.NewHTTP(l.Endpoint, NewCustomHTTPTransport()))
+		}
 	}
 }
 
@@ -85,9 +65,10 @@ func handleCommonCmdArgs(ctx *cli.Context) {
 
 	var configDir string
 
-	if ctx.IsSet("config-dir") {
+	switch {
+	case ctx.IsSet("config-dir"):
 		configDir = ctx.String("config-dir")
-	} else if ctx.GlobalIsSet("config-dir") {
+	case ctx.GlobalIsSet("config-dir"):
 		configDir = ctx.GlobalString("config-dir")
 		// cli package does not expose parent's "config-dir" option.  Below code is workaround.
 		if configDir == "" || configDir == getConfigDir() {
@@ -95,7 +76,7 @@ func handleCommonCmdArgs(ctx *cli.Context) {
 				configDir = ctx.Parent().GlobalString("config-dir")
 			}
 		}
-	} else {
+	default:
 		// Neither local nor global config-dir option is provided.  In this case, try to use
 		// default config directory.
 		configDir = getConfigDir()
@@ -131,6 +112,11 @@ func handleCommonEnvVars() {
 		// credential Envs are set globally.
 		globalIsEnvCreds = true
 		globalActiveCred = cred
+	}
+
+	// In distributed setup users need to set ENVs always.
+	if !globalIsEnvCreds && globalIsDistXL {
+		logger.Fatal(uiErrEnvCredentialsMissingServer(nil), "Unable to start distributed server mode")
 	}
 
 	if browser := os.Getenv("MINIO_BROWSER"); browser != "" {
@@ -264,5 +250,19 @@ func handleCommonEnvVars() {
 		// if worm is turned off or on.
 		globalIsEnvWORM = true
 		globalWORMEnabled = bool(wormFlag)
+	}
+
+	kmsConf, err := crypto.NewVaultConfig()
+	if err != nil {
+		logger.Fatal(err, "Unable to initialize hashicorp vault")
+	}
+	if kmsConf.Vault.Endpoint != "" {
+		kms, err := crypto.NewVault(kmsConf)
+		if err != nil {
+			logger.Fatal(err, "Unable to initialize KMS")
+		}
+		globalKMS = kms
+		globalKMSKeyID = kmsConf.Vault.Key.Name
+		globalKMSConfig = kmsConf
 	}
 }

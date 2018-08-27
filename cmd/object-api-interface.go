@@ -19,7 +19,6 @@ package cmd
 import (
 	"context"
 	"io"
-	"time"
 
 	"github.com/minio/minio/pkg/hash"
 	"github.com/minio/minio/pkg/madmin"
@@ -41,6 +40,9 @@ type ObjectLayer interface {
 	ListObjectsV2(ctx context.Context, bucket, prefix, continuationToken, delimiter string, maxKeys int, fetchOwner bool, startAfter string) (result ListObjectsV2Info, err error)
 
 	// Object operations.
+
+	GetObjectNInfo(ctx context.Context, bucket, object string, rs *HTTPRangeSpec) (objInfo ObjectInfo, reader io.ReadCloser, err error)
+
 	GetObject(ctx context.Context, bucket, object string, startOffset int64, length int64, writer io.Writer, etag string) (err error)
 	GetObjectInfo(ctx context.Context, bucket, object string) (objInfo ObjectInfo, err error)
 	PutObject(ctx context.Context, bucket, object string, data *hash.Reader, metadata map[string]string) (objInfo ObjectInfo, err error)
@@ -64,10 +66,6 @@ type ObjectLayer interface {
 	HealObject(ctx context.Context, bucket, object string, dryRun bool) (madmin.HealResultItem, error)
 	ListBucketsHeal(ctx context.Context) (buckets []BucketInfo, err error)
 	ListObjectsHeal(ctx context.Context, bucket, prefix, marker, delimiter string, maxKeys int) (ListObjectsInfo, error)
-
-	// Locking operations
-	ListLocks(ctx context.Context, bucket, prefix string, duration time.Duration) ([]VolumeLockInfo, error)
-	ClearLocks(context.Context, []VolumeLockInfo) error
 
 	// Policy operations
 	SetBucketPolicy(context.Context, string, *policy.Policy) error

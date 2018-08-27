@@ -36,14 +36,14 @@ var printEndpointError = func() func(Endpoint, error) {
 			m = make(map[string]bool)
 			m[err.Error()] = true
 			printOnce[endpoint] = m
-			logger.LogIf(ctx, err)
+			logger.LogAlwaysIf(ctx, err)
 			return
 		}
 		if m[err.Error()] {
 			return
 		}
 		m[err.Error()] = true
-		logger.LogIf(ctx, err)
+		logger.LogAlwaysIf(ctx, err)
 	}
 }()
 
@@ -80,10 +80,10 @@ func formatXLCleanupTmpLocalEndpoints(endpoints EndpointList) error {
 			}
 			return err
 		}
-		if err := os.RemoveAll(pathJoin(endpoint.Path, minioMetaTmpBucket)); err != nil {
+		if err := removeAll(pathJoin(endpoint.Path, minioMetaTmpBucket)); err != nil {
 			return err
 		}
-		if err := os.MkdirAll(pathJoin(endpoint.Path, minioMetaTmpBucket), 0777); err != nil {
+		if err := mkdirAll(pathJoin(endpoint.Path, minioMetaTmpBucket), 0777); err != nil {
 			return err
 		}
 	}

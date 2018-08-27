@@ -17,8 +17,10 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"io"
+	"io/ioutil"
 	"mime/multipart"
 	"net"
 	"net/http"
@@ -187,6 +189,15 @@ func extractReqParams(r *http.Request) map[string]string {
 	}
 }
 
+// Extract response elements to be sent with event notifiation.
+func extractRespElements(w http.ResponseWriter) map[string]string {
+
+	return map[string]string{
+		"content-length": w.Header().Get("Content-Length"),
+		// Add more fields here.
+	}
+}
+
 // Trims away `aws-chunked` from the content-encoding header if present.
 // Streaming signature clients can have custom content-encoding such as
 // `aws-chunked,gzip` here we need to only save `gzip`.
@@ -235,6 +246,19 @@ func extractPostPolicyFormValues(ctx context.Context, form *multipart.Form) (fil
 		return nil, "", 0, nil, err
 	}
 
+	// this means that filename="" was not specified for file key and Go has
+	// an ugly way of handling this situation. Refer here
+	// https://golang.org/src/mime/multipart/formdata.go#L61
+	if len(form.File) == 0 {
+		var b = &bytes.Buffer{}
+		for _, v := range formValues["File"] {
+			b.WriteString(v)
+		}
+		fileSize = int64(b.Len())
+		filePart = ioutil.NopCloser(b)
+		return filePart, fileName, fileSize, formValues, nil
+	}
+
 	// Iterator until we find a valid File field and break
 	for k, v := range form.File {
 		canonicalFormName := http.CanonicalHeaderKey(k)
@@ -269,7 +293,6 @@ func extractPostPolicyFormValues(ctx context.Context, form *multipart.Form) (fil
 			break
 		}
 	}
-
 	return filePart, fileName, fileSize, formValues, nil
 }
 
