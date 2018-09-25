@@ -755,7 +755,10 @@ func (l *gcsGateway) GetObjectNInfo(ctx context.Context, bucket, object string, 
 		err := l.GetObject(ctx, bucket, object, startOffset, length, pw, objInfo.ETag, minio.ObjectOptions{})
 		pw.CloseWithError(err)
 	}()
-	return minio.NewGetObjectReaderFromReader(pr, objInfo), nil
+	// Setup cleanup function to cause the above go-routine to
+	// exit in case of partial read
+	pipeCloser := func() { pr.Close() }
+	return minio.NewGetObjectReaderFromReader(pr, objInfo, pipeCloser), nil
 }
 
 // GetObject - reads an object from GCS. Supports additional
@@ -772,7 +775,13 @@ func (l *gcsGateway) GetObject(ctx context.Context, bucket string, key string, s
 		return gcsToObjectError(err, bucket)
 	}
 
-	object := l.client.Bucket(bucket).Object(key)
+	// GCS storage decompresses a gzipped object by default and returns the data.
+	// Refer to https://cloud.google.com/storage/docs/transcoding#decompressive_transcoding
+	// Need to set `Accept-Encoding` header to `gzip` when issuing a GetObject call, to be able
+	// to download the object in compressed state.
+	// Calling ReadCompressed with true accomplishes that.
+	object := l.client.Bucket(bucket).Object(key).ReadCompressed(true)
+
 	r, err := object.NewRangeReader(l.ctx, startOffset, length)
 	if err != nil {
 		logger.LogIf(ctx, err)
