@@ -1233,10 +1233,19 @@ func (a *azureObjects) GetBucketPolicy(ctx context.Context, bucket string) (*pol
 				policy.NewActionSet(
 					policy.GetBucketLocationAction,
 					policy.ListBucketAction,
-					policy.GetObjectAction,
 				),
 				policy.NewResourceSet(
 					policy.NewResource(bucket, ""),
+				),
+				condition.NewFunctions(),
+			),
+			policy.NewStatement(
+				policy.Allow,
+				policy.NewPrincipal("*"),
+				policy.NewActionSet(
+					policy.GetObjectAction,
+				),
+				policy.NewResourceSet(
 					policy.NewResource(bucket, "*"),
 				),
 				condition.NewFunctions(),
