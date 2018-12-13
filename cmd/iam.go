@@ -269,10 +269,44 @@ func (sys *IAMSys) DeleteUser(accessKey string) error {
 }
 
 // SetTempUser - set temporary user credentials, these credentials have an expiry.
-func (sys *IAMSys) SetTempUser(accessKey string, cred auth.Credentials) error {
+func (sys *IAMSys) SetTempUser(accessKey string, cred auth.Credentials, policyName string) error {
 	objectAPI := newObjectLayerFn()
 	if objectAPI == nil {
 		return errServerNotInitialized
+	}
+
+	sys.Lock()
+	defer sys.Unlock()
+
+	// If OPA is not set we honor any policy claims for this
+	// temporary user which match with pre-configured canned
+	// policies for this server.
+	if globalPolicyOPA == nil && policyName != "" {
+		p, ok := sys.iamCannedPolicyMap[policyName]
+		if !ok {
+			return errInvalidArgument
+		}
+		if p.IsEmpty() {
+			delete(sys.iamPolicyMap, accessKey)
+			return nil
+		}
+
+		data, err := json.Marshal(policyName)
+		if err != nil {
+			return err
+		}
+
+		configFile := pathJoin(iamConfigSTSPrefix, accessKey, iamPolicyFile)
+		if globalEtcdClient != nil {
+			err = saveConfigEtcd(context.Background(), globalEtcdClient, configFile, data)
+		} else {
+			err = saveConfig(context.Background(), objectAPI, configFile, data)
+		}
+		if err != nil {
+			return err
+		}
+
+		sys.iamPolicyMap[accessKey] = policyName
 	}
 
 	configFile := pathJoin(iamConfigSTSPrefix, accessKey, iamIdentityFile)
@@ -290,9 +324,6 @@ func (sys *IAMSys) SetTempUser(accessKey string, cred auth.Credentials) error {
 	if err != nil {
 		return err
 	}
-
-	sys.Lock()
-	defer sys.Unlock()
 
 	sys.iamUsersMap[accessKey] = cred
 	return nil
@@ -458,7 +489,7 @@ func reloadEtcdUsers(prefix string, usersMap map[string]auth.Credentials, policy
 		//  prefix := "config/iam/users/"
 		//  v := trim(trim(key, prefix), base(key)) == "newuser"
 		//
-		user := strings.TrimSuffix(strings.TrimSuffix(string(kv.Key), prefix), path.Base(string(kv.Key)))
+		user := path.Clean(strings.TrimSuffix(strings.TrimPrefix(string(kv.Key), prefix), path.Base(string(kv.Key))))
 		if !users.Contains(user) {
 			users.Add(user)
 		}
@@ -497,7 +528,7 @@ func reloadEtcdUsers(prefix string, usersMap map[string]auth.Credentials, policy
 			if err = json.Unmarshal(pdata, &policyName); err != nil {
 				return err
 			}
-			policyMap[path.Base(prefix)] = policyName
+			policyMap[user] = policyName
 		}
 	}
 	return nil
@@ -521,11 +552,11 @@ func reloadEtcdPolicies(prefix string, cannedPolicyMap map[string]iampolicy.Poli
 		// then strip off the remaining basename to obtain the prefix
 		// value, usually in the following form.
 		//
-		//  key := "config/iam/policys/newpolicy/identity.json"
-		//  prefix := "config/iam/policys/"
+		//  key := "config/iam/policies/newpolicy/identity.json"
+		//  prefix := "config/iam/policies/"
 		//  v := trim(trim(key, prefix), base(key)) == "newpolicy"
 		//
-		policyName := strings.TrimSuffix(strings.TrimSuffix(string(kv.Key), prefix), path.Base(string(kv.Key)))
+		policyName := path.Clean(strings.TrimSuffix(strings.TrimPrefix(string(kv.Key), prefix), path.Base(string(kv.Key))))
 		if !policies.Contains(policyName) {
 			policies.Add(policyName)
 		}
@@ -542,7 +573,7 @@ func reloadEtcdPolicies(prefix string, cannedPolicyMap map[string]iampolicy.Poli
 		if err = json.Unmarshal(pdata, &p); err != nil {
 			return err
 		}
-		cannedPolicyMap[path.Base(prefix)] = p
+		cannedPolicyMap[policyName] = p
 	}
 	return nil
 }
@@ -632,6 +663,22 @@ func reloadUsers(objectAPI ObjectLayer, prefix string, usersMap map[string]auth.
 	return nil
 }
 
+// Set default canned policies only if not already overridden by users.
+func setDefaultCannedPolicies(policies map[string]iampolicy.Policy) {
+	_, ok := policies["writeonly"]
+	if !ok {
+		policies["writeonly"] = iampolicy.WriteOnly
+	}
+	_, ok = policies["readonly"]
+	if !ok {
+		policies["readonly"] = iampolicy.ReadOnly
+	}
+	_, ok = policies["readwrite"]
+	if !ok {
+		policies["readwrite"] = iampolicy.ReadWrite
+	}
+}
+
 // Refresh IAMSys.
 func (sys *IAMSys) refresh(objAPI ObjectLayer) error {
 	iamUsersMap := make(map[string]auth.Credentials)
@@ -659,6 +706,9 @@ func (sys *IAMSys) refresh(objAPI ObjectLayer) error {
 			return err
 		}
 	}
+
+	// Sets default canned policies, if none set.
+	setDefaultCannedPolicies(iamCannedPolicyMap)
 
 	sys.Lock()
 	defer sys.Unlock()

@@ -156,6 +156,30 @@ func rotateKey(oldKey []byte, newKey []byte, bucket, object string, metadata map
 		sealedKey = objectKey.Seal(extKey, sealedKey.IV, crypto.SSEC.String(), bucket, object)
 		crypto.SSEC.CreateMetadata(metadata, sealedKey)
 		return nil
+	case crypto.S3.IsEncrypted(metadata):
+		if globalKMS == nil {
+			return errKMSNotConfigured
+		}
+		keyID, kmsKey, sealedKey, err := crypto.S3.ParseMetadata(metadata)
+		if err != nil {
+			return err
+		}
+		oldKey, err := globalKMS.UnsealKey(keyID, kmsKey, crypto.Context{bucket: path.Join(bucket, object)})
+		if err != nil {
+			return err
+		}
+		var objectKey crypto.ObjectKey
+		if err = objectKey.Unseal(oldKey, sealedKey, crypto.S3.String(), bucket, object); err != nil {
+			return err
+		}
+
+		newKey, encKey, err := globalKMS.GenerateKey(globalKMSKeyID, crypto.Context{bucket: path.Join(bucket, object)})
+		if err != nil {
+			return err
+		}
+		sealedKey = objectKey.Seal(newKey, crypto.GenerateIV(rand.Reader), crypto.S3.String(), bucket, object)
+		crypto.S3.CreateMetadata(metadata, globalKMSKeyID, encKey, sealedKey)
+		return nil
 	}
 }
 
@@ -332,7 +356,7 @@ func DecryptRequestWithSequenceNumberR(client io.Reader, h http.Header, bucket, 
 
 // DecryptCopyRequestR - same as DecryptCopyRequest, but with a
 // Reader
-func DecryptCopyRequestR(client io.Reader, h http.Header, bucket, object string, metadata map[string]string) (io.Reader, error) {
+func DecryptCopyRequestR(client io.Reader, h http.Header, bucket, object string, seqNumber uint32, metadata map[string]string) (io.Reader, error) {
 	var (
 		key []byte
 		err error
@@ -343,7 +367,7 @@ func DecryptCopyRequestR(client io.Reader, h http.Header, bucket, object string,
 			return nil, err
 		}
 	}
-	return newDecryptReader(client, key, bucket, object, 0, metadata)
+	return newDecryptReader(client, key, bucket, object, seqNumber, metadata)
 }
 
 func newDecryptReader(client io.Reader, key []byte, bucket, object string, seqNumber uint32, metadata map[string]string) (io.Reader, error) {
@@ -365,17 +389,6 @@ func newDecryptReaderWithObjectKey(client io.Reader, objectEncryptionKey []byte,
 	return reader, nil
 }
 
-// GetEncryptedOffsetLength - returns encrypted offset and length
-// along with sequence number
-func GetEncryptedOffsetLength(startOffset, length int64, objInfo ObjectInfo) (seqNumber uint32, encStartOffset, encLength int64) {
-	if !isEncryptedMultipart(objInfo) {
-		seqNumber, encStartOffset, encLength = getEncryptedSinglePartOffsetLength(startOffset, length, objInfo)
-		return
-	}
-	seqNumber, encStartOffset, encLength = getEncryptedMultipartsOffsetLength(startOffset, length, objInfo)
-	return
-}
-
 // DecryptBlocksRequestR - same as DecryptBlocksRequest but with a
 // reader
 func DecryptBlocksRequestR(inputReader io.Reader, h http.Header, offset,
@@ -389,7 +402,7 @@ func DecryptBlocksRequestR(inputReader io.Reader, h http.Header, offset,
 		var reader io.Reader
 		var err error
 		if copySource {
-			reader, err = DecryptCopyRequestR(inputReader, h, bucket, object, oi.UserDefined)
+			reader, err = DecryptCopyRequestR(inputReader, h, bucket, object, seqNumber, oi.UserDefined)
 		} else {
 			reader, err = DecryptRequestWithSequenceNumberR(inputReader, h, bucket, object, seqNumber, oi.UserDefined)
 		}

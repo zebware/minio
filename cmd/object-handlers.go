@@ -33,6 +33,7 @@ import (
 
 	snappy "github.com/golang/snappy"
 	"github.com/gorilla/mux"
+	"github.com/klauspost/readahead"
 	miniogo "github.com/minio/minio-go"
 	"github.com/minio/minio/cmd/crypto"
 	"github.com/minio/minio/cmd/logger"
@@ -70,12 +71,6 @@ func setHeadGetRespHeaders(w http.ResponseWriter, reqParams url.Values) {
 	}
 }
 
-// This function replaces "",'' with `` for the select parser
-func cleanExpr(expr string) string {
-	r := strings.NewReplacer("\"", "`", "'", "`")
-	return r.Replace(expr)
-}
-
 // SelectObjectContentHandler - GET Object?select
 // ----------
 // This implementation of the GET operation retrieves object content based
@@ -84,7 +79,7 @@ func cleanExpr(expr string) string {
 func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "SelectObject")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	// Fetch object stat info.
 	objectAPI := api.ObjectAPI()
@@ -149,8 +144,7 @@ func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r
 		writeErrorResponse(w, ErrEmptyRequestBody, r.URL)
 		return
 	}
-
-	var selectReq ObjectSelectRequest
+	var selectReq s3select.ObjectSelectRequest
 	if err := xmlDecoder(r.Body, &selectReq, r.ContentLength); err != nil {
 		writeErrorResponse(w, ErrMalformedXML, r.URL)
 		return
@@ -179,22 +173,21 @@ func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r
 
 	objInfo := gr.ObjInfo
 
-	if selectReq.InputSerialization.CompressionType == SelectCompressionGZIP {
+	if selectReq.InputSerialization.CompressionType == s3select.SelectCompressionGZIP {
 		if !strings.Contains(objInfo.ContentType, "gzip") {
 			writeErrorResponse(w, ErrInvalidDataSource, r.URL)
 			return
 		}
 	}
-	if selectReq.InputSerialization.CompressionType == SelectCompressionBZIP {
+	if selectReq.InputSerialization.CompressionType == s3select.SelectCompressionBZIP {
 		if !strings.Contains(objInfo.ContentType, "bzip") {
 			writeErrorResponse(w, ErrInvalidDataSource, r.URL)
 			return
 		}
 	}
-	if selectReq.InputSerialization.CompressionType == SelectCompressionNONE ||
-		selectReq.InputSerialization.CompressionType == "" {
-		selectReq.InputSerialization.CompressionType = SelectCompressionNONE
-		if !strings.Contains(objInfo.ContentType, "text/csv") {
+	if selectReq.InputSerialization.CompressionType == "" {
+		selectReq.InputSerialization.CompressionType = s3select.SelectCompressionNONE
+		if !strings.Contains(objInfo.ContentType, "text/csv") && !strings.Contains(objInfo.ContentType, "application/json") {
 			writeErrorResponse(w, ErrInvalidDataSource, r.URL)
 			return
 		}
@@ -207,26 +200,43 @@ func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r
 		writeErrorResponse(w, ErrExpressionTooLong, r.URL)
 		return
 	}
-	if selectReq.InputSerialization.CSV == nil || selectReq.OutputSerialization.CSV == nil {
+	if selectReq.InputSerialization.CSV == nil && selectReq.InputSerialization.JSON == nil {
 		writeErrorResponse(w, ErrInvalidRequestParameter, r.URL)
 		return
 	}
-	if selectReq.InputSerialization.CSV.FileHeaderInfo != CSVFileHeaderInfoUse &&
-		selectReq.InputSerialization.CSV.FileHeaderInfo != CSVFileHeaderInfoNone &&
-		selectReq.InputSerialization.CSV.FileHeaderInfo != CSVFileHeaderInfoIgnore &&
-		selectReq.InputSerialization.CSV.FileHeaderInfo != "" {
-		writeErrorResponse(w, ErrInvalidFileHeaderInfo, r.URL)
-		return
-	}
-	if selectReq.OutputSerialization.CSV.QuoteFields != CSVQuoteFieldsAlways &&
-		selectReq.OutputSerialization.CSV.QuoteFields != CSVQuoteFieldsAsNeeded &&
-		selectReq.OutputSerialization.CSV.QuoteFields != "" {
-		writeErrorResponse(w, ErrInvalidQuoteFields, r.URL)
-		return
-	}
-	if len(selectReq.InputSerialization.CSV.RecordDelimiter) > 2 {
+	if selectReq.OutputSerialization.CSV == nil && selectReq.OutputSerialization.JSON == nil {
 		writeErrorResponse(w, ErrInvalidRequestParameter, r.URL)
 		return
+	}
+
+	if selectReq.InputSerialization.CSV != nil {
+		if selectReq.InputSerialization.CSV.FileHeaderInfo != s3select.CSVFileHeaderInfoUse &&
+			selectReq.InputSerialization.CSV.FileHeaderInfo != s3select.CSVFileHeaderInfoNone &&
+			selectReq.InputSerialization.CSV.FileHeaderInfo != s3select.CSVFileHeaderInfoIgnore &&
+			selectReq.InputSerialization.CSV.FileHeaderInfo != "" {
+			writeErrorResponse(w, ErrInvalidFileHeaderInfo, r.URL)
+			return
+		}
+		if selectReq.OutputSerialization.CSV.QuoteFields != s3select.CSVQuoteFieldsAlways &&
+			selectReq.OutputSerialization.CSV.QuoteFields != s3select.CSVQuoteFieldsAsNeeded &&
+			selectReq.OutputSerialization.CSV.QuoteFields != "" {
+			writeErrorResponse(w, ErrInvalidQuoteFields, r.URL)
+			return
+		}
+		if len(selectReq.InputSerialization.CSV.RecordDelimiter) > 2 {
+			writeErrorResponse(w, ErrInvalidRequestParameter, r.URL)
+			return
+		}
+
+	}
+	if selectReq.InputSerialization.JSON != nil {
+		if selectReq.InputSerialization.JSON.Type != s3select.JSONTypeDocument &&
+			selectReq.InputSerialization.JSON.Type != s3select.JSONLinesType &&
+			selectReq.InputSerialization.JSON.Type != "" {
+			writeErrorResponse(w, ErrInvalidJSONType, r.URL)
+			return
+		}
+
 	}
 
 	// Set encryption response headers
@@ -242,51 +252,42 @@ func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r
 		}
 	}
 
-	//s3select //Options
-	if selectReq.OutputSerialization.CSV.FieldDelimiter == "" {
-		selectReq.OutputSerialization.CSV.FieldDelimiter = ","
-	}
-	if selectReq.InputSerialization.CSV.FileHeaderInfo == "" {
-		selectReq.InputSerialization.CSV.FileHeaderInfo = CSVFileHeaderInfoNone
-	}
-	if selectReq.InputSerialization.CSV.RecordDelimiter == "" {
-		selectReq.InputSerialization.CSV.RecordDelimiter = "\n"
-	}
-	if selectReq.InputSerialization.CSV != nil {
-		options := &s3select.Options{
-			HasHeader:            selectReq.InputSerialization.CSV.FileHeaderInfo != CSVFileHeaderInfoNone,
-			RecordDelimiter:      selectReq.InputSerialization.CSV.RecordDelimiter,
-			FieldDelimiter:       selectReq.InputSerialization.CSV.FieldDelimiter,
-			Comments:             selectReq.InputSerialization.CSV.Comments,
-			Name:                 "S3Object", // Default table name for all objects
-			ReadFrom:             gr,
-			Compressed:           string(selectReq.InputSerialization.CompressionType),
-			Expression:           cleanExpr(selectReq.Expression),
-			OutputFieldDelimiter: selectReq.OutputSerialization.CSV.FieldDelimiter,
-			StreamSize:           objInfo.Size,
-			HeaderOpt:            selectReq.InputSerialization.CSV.FileHeaderInfo == CSVFileHeaderInfoUse,
-			Progress:             selectReq.RequestProgress.Enabled,
-		}
-		s3s, err := s3select.NewInput(options)
-		if err != nil {
-			writeErrorResponse(w, toAPIErrorCode(err), r.URL)
-			return
-		}
-		_, _, _, _, _, _, err = s3s.ParseSelect(options.Expression)
-		if err != nil {
-			writeErrorResponse(w, toAPIErrorCode(err), r.URL)
-			return
-		}
-		if err = s3s.Execute(w); err != nil {
-			logger.LogIf(ctx, err)
-		}
+	reader := readahead.NewReader(gr)
+	defer reader.Close()
+
+	s3s, err := s3select.New(reader, objInfo.GetActualSize(), selectReq)
+	if err != nil {
+		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
+		return
 	}
 
-	for k, v := range objInfo.UserDefined {
-		logger.GetReqInfo(ctx).SetTags(k, v)
+	// Parses the select query and checks for an error
+	_, _, _, _, _, _, err = s3select.ParseSelect(s3s)
+	if err != nil {
+		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
+		return
 	}
 
-	logger.GetReqInfo(ctx).SetTags("etag", objInfo.ETag)
+	// Executes the query on data-set
+	s3select.Execute(w, s3s)
+
+	// Get host and port from Request.RemoteAddr.
+	host, port, err := net.SplitHostPort(handlers.GetSourceIP(r))
+	if err != nil {
+		host, port = "", ""
+	}
+
+	// Notify object accessed via a GET request.
+	sendEvent(eventArgs{
+		EventName:    event.ObjectAccessedGet,
+		BucketName:   bucket,
+		Object:       objInfo,
+		ReqParams:    extractReqParams(r),
+		RespElements: extractRespElements(w),
+		UserAgent:    r.UserAgent(),
+		Host:         host,
+		Port:         port,
+	})
 }
 
 // GetObjectHandler - GET Object
@@ -296,7 +297,7 @@ func (api objectAPIHandlers) SelectObjectContentHandler(w http.ResponseWriter, r
 func (api objectAPIHandlers) GetObjectHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "GetObject")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	objectAPI := api.ObjectAPI()
 	if objectAPI == nil {
@@ -380,6 +381,7 @@ func (api objectAPIHandlers) GetObjectHandler(w http.ResponseWriter, r *http.Req
 		return
 	}
 	defer gr.Close()
+
 	objInfo := gr.ObjInfo
 
 	if objectAPI.IsEncryptionSupported() {
@@ -453,12 +455,6 @@ func (api objectAPIHandlers) GetObjectHandler(w http.ResponseWriter, r *http.Req
 		Host:         host,
 		Port:         port,
 	})
-
-	for k, v := range objInfo.UserDefined {
-		logger.GetReqInfo(ctx).SetTags(k, v)
-	}
-
-	logger.GetReqInfo(ctx).SetTags("etag", objInfo.ETag)
 }
 
 // HeadObjectHandler - HEAD Object
@@ -467,7 +463,7 @@ func (api objectAPIHandlers) GetObjectHandler(w http.ResponseWriter, r *http.Req
 func (api objectAPIHandlers) HeadObjectHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "HeadObject")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	objectAPI := api.ObjectAPI()
 	if objectAPI == nil {
@@ -607,12 +603,6 @@ func (api objectAPIHandlers) HeadObjectHandler(w http.ResponseWriter, r *http.Re
 		Host:         host,
 		Port:         port,
 	})
-
-	for k, v := range objInfo.UserDefined {
-		logger.GetReqInfo(ctx).SetTags(k, v)
-	}
-
-	logger.GetReqInfo(ctx).SetTags("etag", objInfo.ETag)
 }
 
 // Extract metadata relevant for an CopyObject operation based on conditional
@@ -653,7 +643,7 @@ func getCpObjMetadataFromHeader(ctx context.Context, r *http.Request, userMeta m
 func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "CopyObject")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	objectAPI := api.ObjectAPI()
 	if objectAPI == nil {
@@ -690,6 +680,11 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	if s3Error := checkRequestAuthType(ctx, r, policy.GetObjectAction, srcBucket, srcObject); s3Error != ErrNone {
+		writeErrorResponse(w, s3Error, r.URL)
+		return
+	}
+
 	// Check if metadata directive is valid.
 	if !isMetadataDirectiveValid(r.Header) {
 		writeErrorResponse(w, ErrInvalidMetadataDirective, r.URL)
@@ -713,30 +708,12 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		getObjectNInfo = api.CacheAPI().GetObjectNInfo
 	}
 
-	// Get request range.
-	var rs *HTTPRangeSpec
-	rangeHeader := r.Header.Get("x-amz-copy-source-range")
-	if rangeHeader != "" {
-		var parseRangeErr error
-		if rs, parseRangeErr = parseRequestRangeSpec(rangeHeader); parseRangeErr != nil {
-			// Handle only errInvalidRange. Ignore other
-			// parse error and treat it as regular Get
-			// request like Amazon S3.
-			if parseRangeErr == errInvalidRange {
-				writeErrorResponse(w, ErrInvalidRange, r.URL)
-				return
-			}
-
-			// log the error.
-			logger.LogIf(ctx, parseRangeErr)
-		}
-	}
-
 	var lock = noLock
 	if !cpSrcDstSame {
 		lock = readLock
 	}
 
+	var rs *HTTPRangeSpec
 	gr, err := getObjectNInfo(ctx, srcBucket, srcObject, rs, r.Header, lock, srcOpts)
 	if err != nil {
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
@@ -775,9 +752,27 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 
 	var reader io.Reader
 	var length = srcInfo.Size
+
+	// Set the actual size to the decrypted size if encrypted.
+	actualSize := srcInfo.Size
+	if crypto.IsEncrypted(srcInfo.UserDefined) {
+		actualSize, err = srcInfo.DecryptedSize()
+		if err != nil {
+			writeErrorResponse(w, toAPIErrorCode(err), r.URL)
+			return
+		}
+	}
+
 	// No need to compress for remote etcd calls
 	// Pass the decompressed stream to such calls.
-	if srcInfo.IsCompressed() && !isRemoteCallRequired(ctx, srcBucket, dstBucket, objectAPI) {
+	isCompressed := objectAPI.IsCompressionSupported() && isCompressible(r.Header, srcObject) && !isRemoteCallRequired(ctx, srcBucket, dstBucket, objectAPI)
+	if isCompressed {
+		// Storing the compression metadata.
+		srcInfo.UserDefined[ReservedMetadataPrefix+"compression"] = compressionAlgorithmV1
+		srcInfo.UserDefined[ReservedMetadataPrefix+"actual-size"] = strconv.FormatInt(actualSize, 10)
+		// Remove all source encrypted related metadata to
+		// avoid copying them in target object.
+		crypto.RemoveInternalEntries(srcInfo.UserDefined)
 		// Open a pipe for compression.
 		// Where pipeWriter is piped to srcInfo.Reader.
 		// gr writes to pipeWriter.
@@ -800,17 +795,27 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		reader = gr
 	}
 
-	srcInfo.Reader, err = hash.NewReader(reader, length, "", "", srcInfo.Size)
+	srcInfo.Reader, err = hash.NewReader(reader, length, "", "", actualSize)
 	if err != nil {
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return
 	}
 
 	var encMetadata = make(map[string]string)
-	if objectAPI.IsEncryptionSupported() && !srcInfo.IsCompressed() {
+	if objectAPI.IsEncryptionSupported() && !isCompressed {
+		// Encryption parameters not applicable for this object.
+		if !crypto.IsEncrypted(srcInfo.UserDefined) && crypto.SSECopy.IsRequested(r.Header) {
+			writeErrorResponse(w, toAPIErrorCode(errInvalidEncryptionParameters), r.URL)
+			return
+		}
+		// Encryption parameters not present for this object.
+		if crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && !crypto.SSECopy.IsRequested(r.Header) {
+			writeErrorResponse(w, ErrInvalidSSECustomerAlgorithm, r.URL)
+			return
+		}
 		var oldKey, newKey []byte
 		sseCopyS3 := crypto.S3.IsEncrypted(srcInfo.UserDefined)
-		sseCopyC := crypto.SSECopy.IsRequested(r.Header)
+		sseCopyC := crypto.SSEC.IsEncrypted(srcInfo.UserDefined) && crypto.SSECopy.IsRequested(r.Header)
 		sseC := crypto.SSEC.IsRequested(r.Header)
 		sseS3 := crypto.S3.IsRequested(r.Header)
 
@@ -824,19 +829,24 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 				return
 			}
 		}
-		// AWS S3 implementation requires us to only rotate keys
-		// when/ both keys are provided and destination is same
-		// otherwise we proceed to encrypt/decrypt.
-		if sseCopyC && sseC && cpSrcDstSame {
-			// Get the old key which needs to be rotated.
-			oldKey, err = ParseSSECopyCustomerRequest(r.Header, srcInfo.UserDefined)
-			if err != nil {
-				writeErrorResponse(w, toAPIErrorCode(err), r.URL)
-				return
+
+		// If src == dst and either
+		// - the object is encrypted using SSE-C and two different SSE-C keys are present
+		// - the object is encrypted using SSE-S3 and the SSE-S3 header is present
+		// than execute a key rotation.
+		if cpSrcDstSame && ((sseCopyC && sseC) || (sseS3 && sseCopyS3)) {
+			if sseCopyC && sseC {
+				oldKey, err = ParseSSECopyCustomerRequest(r.Header, srcInfo.UserDefined)
+				if err != nil {
+					writeErrorResponse(w, toAPIErrorCode(err), r.URL)
+					return
+				}
 			}
 			for k, v := range srcInfo.UserDefined {
 				encMetadata[k] = v
 			}
+
+			// In case of SSE-S3 oldKey and newKey aren't used - the KMS manages the keys.
 			if err = rotateKey(oldKey, newKey, srcBucket, srcObject, encMetadata); err != nil {
 				writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 				return
@@ -878,13 +888,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 			if isSourceEncrypted {
 				// Remove all source encrypted related metadata to
 				// avoid copying them in target object.
-				delete(srcInfo.UserDefined, crypto.SSEIV)
-				delete(srcInfo.UserDefined, crypto.SSESealAlgorithm)
-				delete(srcInfo.UserDefined, crypto.SSECSealedKey)
-				delete(srcInfo.UserDefined, crypto.SSEMultipart)
-				delete(srcInfo.UserDefined, crypto.S3SealedKey)
-				delete(srcInfo.UserDefined, crypto.S3KMSSealedKey)
-				delete(srcInfo.UserDefined, crypto.S3KMSKeyID)
+				crypto.RemoveInternalEntries(srcInfo.UserDefined)
 			}
 
 			srcInfo.Reader, err = hash.NewReader(reader, targetSize, "", "", targetSize) // do not try to verify encrypted content
@@ -915,7 +919,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 	// metadataOnly is true indicating that we are not overwriting the object.
 	// if encryption is enabled we do not need explicit "REPLACE" metadata to
 	// be enabled as well - this is to allow for key-rotation.
-	if !isMetadataReplace(r.Header) && srcInfo.metadataOnly && !crypto.SSEC.IsEncrypted(srcInfo.UserDefined) {
+	if !isMetadataReplace(r.Header) && srcInfo.metadataOnly && !crypto.IsEncrypted(srcInfo.UserDefined) {
 		// If x-amz-metadata-directive is not set to REPLACE then we need
 		// to error out if source and destination are same.
 		writeErrorResponse(w, ErrInvalidCopyDest, r.URL)
@@ -979,26 +983,21 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 		host, port = "", ""
 	}
 
-	if srcInfo.IsCompressed() {
-		objInfo.Size = srcInfo.GetActualSize()
+	if objInfo.IsCompressed() {
+		objInfo.Size = actualSize
 	}
 
 	// Notify object created event.
 	sendEvent(eventArgs{
-		EventName:  event.ObjectCreatedCopy,
-		BucketName: dstBucket,
-		Object:     objInfo,
-		ReqParams:  extractReqParams(r),
-		UserAgent:  r.UserAgent(),
-		Host:       host,
-		Port:       port,
+		EventName:    event.ObjectCreatedCopy,
+		BucketName:   dstBucket,
+		Object:       objInfo,
+		ReqParams:    extractReqParams(r),
+		RespElements: extractRespElements(w),
+		UserAgent:    r.UserAgent(),
+		Host:         host,
+		Port:         port,
 	})
-
-	for k, v := range objInfo.UserDefined {
-		logger.GetReqInfo(ctx).SetTags(k, v)
-	}
-
-	logger.GetReqInfo(ctx).SetTags("etag", objInfo.ETag)
 }
 
 // PutObjectHandler - PUT Object
@@ -1012,7 +1011,7 @@ func (api objectAPIHandlers) CopyObjectHandler(w http.ResponseWriter, r *http.Re
 func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "PutObject")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	objectAPI := api.ObjectAPI()
 	if objectAPI == nil {
@@ -1245,20 +1244,15 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 
 	// Notify object created event.
 	sendEvent(eventArgs{
-		EventName:  event.ObjectCreatedPut,
-		BucketName: bucket,
-		Object:     objInfo,
-		ReqParams:  extractReqParams(r),
-		UserAgent:  r.UserAgent(),
-		Host:       host,
-		Port:       port,
+		EventName:    event.ObjectCreatedPut,
+		BucketName:   bucket,
+		Object:       objInfo,
+		ReqParams:    extractReqParams(r),
+		RespElements: extractRespElements(w),
+		UserAgent:    r.UserAgent(),
+		Host:         host,
+		Port:         port,
 	})
-
-	for k, v := range objInfo.UserDefined {
-		logger.GetReqInfo(ctx).SetTags(k, v)
-	}
-
-	logger.GetReqInfo(ctx).SetTags("etag", objInfo.ETag)
 }
 
 /// Multipart objectAPIHandlers
@@ -1272,7 +1266,7 @@ func (api objectAPIHandlers) PutObjectHandler(w http.ResponseWriter, r *http.Req
 func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "NewMultipartUpload")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	objectAPI := api.ObjectAPI()
 	if objectAPI == nil {
@@ -1366,7 +1360,7 @@ func (api objectAPIHandlers) NewMultipartUploadHandler(w http.ResponseWriter, r 
 func (api objectAPIHandlers) CopyObjectPartHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "CopyObjectPart")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	objectAPI := api.ObjectAPI()
 	if objectAPI == nil {
@@ -1398,6 +1392,11 @@ func (api objectAPIHandlers) CopyObjectPartHandler(w http.ResponseWriter, r *htt
 	// If source object is empty or bucket is empty, reply back invalid copy source.
 	if srcObject == "" || srcBucket == "" {
 		writeErrorResponse(w, ErrInvalidCopySource, r.URL)
+		return
+	}
+
+	if s3Error := checkRequestAuthType(ctx, r, policy.GetObjectAction, srcBucket, srcObject); s3Error != ErrNone {
+		writeErrorResponse(w, s3Error, r.URL)
 		return
 	}
 
@@ -1454,11 +1453,17 @@ func (api objectAPIHandlers) CopyObjectPartHandler(w http.ResponseWriter, r *htt
 	defer gr.Close()
 	srcInfo := gr.ObjInfo
 
-	var actualPartSize int64
-	actualPartSize = srcInfo.Size
+	actualPartSize := srcInfo.Size
+	if crypto.IsEncrypted(srcInfo.UserDefined) {
+		actualPartSize, err = srcInfo.DecryptedSize()
+		if err != nil {
+			writeErrorResponse(w, toAPIErrorCode(err), r.URL)
+			return
+		}
+	}
 
 	// Special care for CopyObjectPart
-	if partRangeErr := checkCopyPartRangeWithSize(rs, srcInfo.Size); partRangeErr != nil {
+	if partRangeErr := checkCopyPartRangeWithSize(rs, actualPartSize); partRangeErr != nil {
 		writeCopyPartErr(w, partRangeErr, r.URL)
 		return
 	}
@@ -1469,21 +1474,10 @@ func (api objectAPIHandlers) CopyObjectPartHandler(w http.ResponseWriter, r *htt
 	}
 
 	// Get the object offset & length
-	startOffset, length, _ := rs.GetOffsetLength(srcInfo.Size)
-
-	if rangeHeader != "" {
-		actualPartSize = length
-	}
-
-	if objectAPI.IsEncryptionSupported() {
-		if crypto.IsEncrypted(srcInfo.UserDefined) {
-			decryptedSize, decryptErr := srcInfo.DecryptedSize()
-			if decryptErr != nil {
-				writeErrorResponse(w, toAPIErrorCode(err), r.URL)
-				return
-			}
-			startOffset, length, _ = rs.GetOffsetLength(decryptedSize)
-		}
+	startOffset, length, err := rs.GetOffsetLength(actualPartSize)
+	if err != nil {
+		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
+		return
 	}
 
 	/// maximum copy size for multipart objects in a single operation
@@ -1492,11 +1486,21 @@ func (api objectAPIHandlers) CopyObjectPartHandler(w http.ResponseWriter, r *htt
 		return
 	}
 
+	actualPartSize = length
 	var reader io.Reader
-	var getLength = length
 
-	// Need to decompress only for range-enabled copy parts.
-	if srcInfo.IsCompressed() && rangeHeader != "" {
+	var li ListPartsInfo
+	li, err = objectAPI.ListObjectParts(ctx, dstBucket, dstObject, uploadID, 0, 1)
+	if err != nil {
+		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
+		return
+	}
+
+	// Read compression metadata preserved in the init multipart for the decision.
+	_, compressPart := li.UserDefined[ReservedMetadataPrefix+"compression"]
+	isCompressed := compressPart
+	// Compress only if the compression is enabled during initial multipart.
+	if isCompressed {
 		// Open a pipe for compression.
 		// Where pipeWriter is piped to srcInfo.Reader.
 		// gr writes to pipeWriter.
@@ -1522,15 +1526,13 @@ func (api objectAPIHandlers) CopyObjectPartHandler(w http.ResponseWriter, r *htt
 		return
 	}
 
-	if objectAPI.IsEncryptionSupported() && !srcInfo.IsCompressed() {
-		var li ListPartsInfo
-		li, err = objectAPI.ListObjectParts(ctx, dstBucket, dstObject, uploadID, 0, 1)
-		if err != nil {
-			writeErrorResponse(w, toAPIErrorCode(err), r.URL)
-			return
-		}
+	if objectAPI.IsEncryptionSupported() && !isCompressed {
 		if crypto.IsEncrypted(li.UserDefined) {
-			if !hasServerSideEncryptionHeader(r.Header) {
+			if !crypto.SSEC.IsRequested(r.Header) && crypto.SSEC.IsEncrypted(li.UserDefined) {
+				writeErrorResponse(w, ErrSSEMultipartEncrypted, r.URL)
+				return
+			}
+			if crypto.S3.IsEncrypted(li.UserDefined) && crypto.SSEC.IsRequested(r.Header) {
 				writeErrorResponse(w, ErrSSEMultipartEncrypted, r.URL)
 				return
 			}
@@ -1562,18 +1564,18 @@ func (api objectAPIHandlers) CopyObjectPartHandler(w http.ResponseWriter, r *htt
 			}
 
 			info := ObjectInfo{Size: length}
-			size := info.EncryptedSize()
-			srcInfo.Reader, err = hash.NewReader(reader, size, "", "", actualPartSize)
+			srcInfo.Reader, err = hash.NewReader(reader, info.EncryptedSize(), "", "", length)
 			if err != nil {
 				writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 				return
 			}
 		}
 	}
+
 	// Copy source object to destination, if source and destination
 	// object is same then only metadata is updated.
-	partInfo, err := objectAPI.CopyObjectPart(ctx, srcBucket, srcObject, dstBucket,
-		dstObject, uploadID, partID, startOffset, getLength, srcInfo, srcOpts, dstOpts)
+	partInfo, err := objectAPI.CopyObjectPart(ctx, srcBucket, srcObject, dstBucket, dstObject, uploadID, partID,
+		startOffset, length, srcInfo, srcOpts, dstOpts)
 	if err != nil {
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return
@@ -1590,7 +1592,7 @@ func (api objectAPIHandlers) CopyObjectPartHandler(w http.ResponseWriter, r *htt
 func (api objectAPIHandlers) PutObjectPartHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "PutObjectPart")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	objectAPI := api.ObjectAPI()
 	if objectAPI == nil {
@@ -1834,7 +1836,7 @@ func (api objectAPIHandlers) PutObjectPartHandler(w http.ResponseWriter, r *http
 func (api objectAPIHandlers) AbortMultipartUploadHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "AbortMultipartUpload")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -1872,6 +1874,7 @@ func (api objectAPIHandlers) AbortMultipartUploadHandler(w http.ResponseWriter, 
 		writeErrorResponse(w, toAPIErrorCode(err), r.URL)
 		return
 	}
+
 	writeSuccessNoContent(w)
 }
 
@@ -1879,7 +1882,7 @@ func (api objectAPIHandlers) AbortMultipartUploadHandler(w http.ResponseWriter, 
 func (api objectAPIHandlers) ListObjectPartsHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "ListObjectParts")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -1925,7 +1928,7 @@ func (api objectAPIHandlers) ListObjectPartsHandler(w http.ResponseWriter, r *ht
 func (api objectAPIHandlers) CompleteMultipartUploadHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "CompleteMultipartUpload")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -2029,20 +2032,15 @@ func (api objectAPIHandlers) CompleteMultipartUploadHandler(w http.ResponseWrite
 
 	// Notify object created event.
 	sendEvent(eventArgs{
-		EventName:  event.ObjectCreatedCompleteMultipartUpload,
-		BucketName: bucket,
-		Object:     objInfo,
-		ReqParams:  extractReqParams(r),
-		UserAgent:  r.UserAgent(),
-		Host:       host,
-		Port:       port,
+		EventName:    event.ObjectCreatedCompleteMultipartUpload,
+		BucketName:   bucket,
+		Object:       objInfo,
+		ReqParams:    extractReqParams(r),
+		RespElements: extractRespElements(w),
+		UserAgent:    r.UserAgent(),
+		Host:         host,
+		Port:         port,
 	})
-
-	for k, v := range objInfo.UserDefined {
-		logger.GetReqInfo(ctx).SetTags(k, v)
-	}
-
-	logger.GetReqInfo(ctx).SetTags("etag", objInfo.ETag)
 }
 
 /// Delete objectAPIHandlers
@@ -2051,7 +2049,7 @@ func (api objectAPIHandlers) CompleteMultipartUploadHandler(w http.ResponseWrite
 func (api objectAPIHandlers) DeleteObjectHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := newContext(r, w, "DeleteObject")
 
-	defer logger.AuditLog(ctx, r)
+	defer logger.AuditLog(ctx, w, r)
 
 	vars := mux.Vars(r)
 	bucket := vars["bucket"]
@@ -2086,21 +2084,18 @@ func (api objectAPIHandlers) DeleteObjectHandler(w http.ResponseWriter, r *http.
 			}
 			return
 		}
-	} else {
-		getBucketInfo := objectAPI.GetBucketInfo
-		if api.CacheAPI() != nil {
-			getBucketInfo = api.CacheAPI().GetBucketInfo
-		}
-		if _, err := getBucketInfo(ctx, bucket); err != nil {
-			writeErrorResponse(w, toAPIErrorCode(err), r.URL)
-			return
-		}
 	}
 
 	// http://docs.aws.amazon.com/AmazonS3/latest/API/RESTObjectDELETE.html
-	// Ignore delete object errors while replying to client, since we are
-	// suppposed to reply only 204. Additionally log the error for
-	// investigation.
-	deleteObject(ctx, objectAPI, api.CacheAPI(), bucket, object, r)
+	if err := deleteObject(ctx, objectAPI, api.CacheAPI(), bucket, object, r); err != nil {
+		switch toAPIErrorCode(err) {
+		case ErrNoSuchBucket:
+			// When bucket doesn't exist specially handle it.
+			writeErrorResponse(w, ErrNoSuchBucket, r.URL)
+			return
+		}
+		logger.LogIf(ctx, err)
+		// Ignore delete object errors while replying to client, since we are suppposed to reply only 204.
+	}
 	writeSuccessNoContent(w)
 }

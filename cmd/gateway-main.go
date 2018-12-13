@@ -134,9 +134,6 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 	// Handle common command args.
 	handleCommonCmdArgs(ctx)
 
-	// Handle common env vars.
-	handleCommonEnvVars()
-
 	// Get port to listen on from gateway address
 	_, gatewayPort, pErr := net.SplitHostPort(gatewayAddr)
 	if pErr != nil {
@@ -149,18 +146,25 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 	// To avoid this error situation we check for port availability.
 	logger.FatalIf(checkPortAvailability(gatewayPort), "Unable to start the gateway")
 
+	// Create certs path.
+	logger.FatalIf(createConfigDir(), "Unable to create configuration directories")
+
+	// Check and load TLS certificates.
+	var err error
+	globalPublicCerts, globalTLSCerts, globalIsSSL, err = getTLSConfig()
+	logger.FatalIf(err, "Invalid TLS certificate file")
+
+	// Check and load Root CAs.
+	globalRootCAs, err = getRootCAs(getCADir())
+	logger.FatalIf(err, "Failed to read root CAs (%v)", err)
+
+	// Handle common env vars.
+	handleCommonEnvVars()
+
 	// Validate if we have access, secret set through environment.
 	if !globalIsEnvCreds {
 		logger.Fatal(uiErrEnvCredentialsMissingGateway(nil), "Unable to start gateway")
 	}
-
-	// Create certs path.
-	logger.FatalIf(createConfigDir(), "Unable to create configuration directories")
-
-	// Check and load SSL certificates.
-	var err error
-	globalPublicCerts, globalRootCAs, globalTLSCerts, globalIsSSL, err = getSSLConfig()
-	logger.FatalIf(err, "Invalid SSL certificate file")
 
 	// Set system resources to maximum.
 	logger.LogIf(context.Background(), setMaxResources())
@@ -244,9 +248,6 @@ func StartGateway(ctx *cli.Context, gw Gateway) {
 		globalCacheObjectAPI, err = newServerCacheObjects(cacheConfig)
 		logger.FatalIf(err, "Unable to initialize disk caching")
 	}
-
-	// Load logger subsystem
-	loadLoggers()
 
 	// Re-enable logging
 	logger.Disable = false
