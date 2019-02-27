@@ -32,6 +32,7 @@ import (
 
 	"github.com/inconshreveable/go-update"
 	"github.com/minio/cli"
+	xhttp "github.com/minio/minio/cmd/http"
 	"github.com/minio/minio/cmd/logger"
 	_ "github.com/minio/sha256-simd" // Needed for sha256 hash verifier.
 	"github.com/segmentio/go-prompt"
@@ -40,12 +41,12 @@ import (
 // Check for new software updates.
 var updateCmd = cli.Command{
 	Name:   "update",
-	Usage:  "Check for a new software update.",
+	Usage:  "update minio to latest release",
 	Action: mainUpdate,
 	Flags: []cli.Flag{
 		cli.BoolFlag{
 			Name:  "quiet",
-			Usage: "Disable any update prompt message.",
+			Usage: "disable any update prompt message",
 		},
 	},
 	CustomHelpTemplate: `Name:
@@ -253,12 +254,6 @@ func getUserAgent(mode string) string {
 	if mode != "" {
 		uaAppend("; ", mode)
 	}
-	if len(globalCacheDrives) > 0 {
-		uaAppend("; ", "feature-cache")
-	}
-	if globalWORMEnabled {
-		uaAppend("; ", "feature-worm")
-	}
 	if IsDCOS() {
 		uaAppend("; ", "dcos")
 	}
@@ -324,7 +319,7 @@ func downloadReleaseURL(releaseChecksumURL string, timeout time.Duration, mode s
 	if resp == nil {
 		return content, fmt.Errorf("No response from server to download URL %s", releaseChecksumURL)
 	}
-	defer CloseResponse(resp.Body)
+	defer xhttp.DrainBody(resp.Body)
 
 	if resp.StatusCode != http.StatusOK {
 		return content, fmt.Errorf("Error downloading URL %s. Response: %v", releaseChecksumURL, resp.Status)
@@ -471,7 +466,7 @@ func doUpdate(sha256Hex string, latestReleaseTime time.Time, ok bool) (updateSta
 	if err != nil {
 		return updateStatusMsg, err
 	}
-	defer CloseResponse(resp.Body)
+	defer xhttp.DrainBody(resp.Body)
 
 	// FIXME: add support for gpg verification as well.
 	if err = update.Apply(resp.Body,

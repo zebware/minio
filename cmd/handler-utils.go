@@ -28,6 +28,7 @@ import (
 	"strings"
 
 	"github.com/minio/minio/cmd/logger"
+	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/handlers"
 	httptracer "github.com/minio/minio/pkg/handlers"
 )
@@ -133,6 +134,11 @@ func extractMetadata(ctx context.Context, r *http.Request) (metadata map[string]
 		return nil, err
 	}
 
+	// Set content-type to default value if it is not set.
+	if _, ok := metadata["content-type"]; !ok {
+		metadata["content-type"] = "application/octet-stream"
+	}
+
 	// Success.
 	return metadata, nil
 }
@@ -176,13 +182,20 @@ func getRedirectPostRawQuery(objInfo ObjectInfo) string {
 	return redirectValues.Encode()
 }
 
-// Returns access key in the request Authorization header.
-func getReqAccessKey(r *http.Request, region string) (accessKey string) {
-	accessKey, _, _ = getReqAccessKeyV4(r, region)
-	if accessKey == "" {
-		accessKey, _, _ = getReqAccessKeyV2(r)
+// Returns access credentials in the request Authorization header.
+func getReqAccessCred(r *http.Request, region string) (cred auth.Credentials) {
+	cred, _, _ = getReqAccessKeyV4(r, region)
+	if cred.AccessKey == "" {
+		cred, _, _ = getReqAccessKeyV2(r)
 	}
-	return accessKey
+	if cred.AccessKey == "" {
+		claims, owner, _ := webRequestAuthenticate(r)
+		if owner {
+			return globalServerConfig.GetCredential()
+		}
+		cred, _ = globalIAMSys.GetUser(claims.Subject)
+	}
+	return cred
 }
 
 // Extract request params to be sent with event notifiation.
@@ -192,10 +205,12 @@ func extractReqParams(r *http.Request) map[string]string {
 	}
 
 	region := globalServerConfig.GetRegion()
+	cred := getReqAccessCred(r, region)
+
 	// Success.
 	return map[string]string{
 		"region":          region,
-		"accessKey":       getReqAccessKey(r, region),
+		"accessKey":       cred.AccessKey,
 		"sourceIPAddress": handlers.GetSourceIP(r),
 		// Add more fields here.
 	}
@@ -326,8 +341,8 @@ func httpTraceHdrs(f http.HandlerFunc) http.HandlerFunc {
 }
 
 // Returns "/bucketName/objectName" for path-style or virtual-host-style requests.
-func getResource(path string, host string, domain string) (string, error) {
-	if domain == "" {
+func getResource(path string, host string, domains []string) (string, error) {
+	if len(domains) == 0 {
 		return path, nil
 	}
 	// If virtual-host-style is enabled construct the "resource" properly.
@@ -342,15 +357,22 @@ func getResource(path string, host string, domain string) (string, error) {
 			return "", err
 		}
 	}
-	if !strings.HasSuffix(host, "."+domain) {
-		return path, nil
+	for _, domain := range domains {
+		if !strings.HasSuffix(host, "."+domain) {
+			continue
+		}
+		bucket := strings.TrimSuffix(host, "."+domain)
+		return slashSeparator + pathJoin(bucket, path), nil
 	}
-	bucket := strings.TrimSuffix(host, "."+domain)
-	return slashSeparator + pathJoin(bucket, path), nil
+	return path, nil
+}
+
+// If none of the http routes match respond with MethodNotAllowed, in JSON
+func notFoundHandlerJSON(w http.ResponseWriter, r *http.Request) {
+	writeErrorResponseJSON(context.Background(), w, errorCodes.ToAPIErr(ErrMethodNotAllowed), r.URL)
 }
 
 // If none of the http routes match respond with MethodNotAllowed
 func notFoundHandler(w http.ResponseWriter, r *http.Request) {
-	writeErrorResponse(w, ErrMethodNotAllowed, r.URL)
-	return
+	writeErrorResponse(context.Background(), w, errorCodes.ToAPIErr(ErrMethodNotAllowed), r.URL, guessIsBrowserReq(r))
 }

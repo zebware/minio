@@ -17,11 +17,13 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"encoding/hex"
 	"fmt"
 	"io"
 	"math/rand"
+	"net"
 	"net/http"
 	"path"
 	"runtime"
@@ -35,6 +37,7 @@ import (
 	"github.com/minio/minio/cmd/crypto"
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/dns"
+	"github.com/minio/minio/pkg/hash"
 	"github.com/minio/minio/pkg/ioutil"
 	"github.com/minio/minio/pkg/wildcard"
 	"github.com/skyrings/skyring-common/tools/uuid"
@@ -297,11 +300,11 @@ func getHostsSlice(records []dns.SrvRecord) []string {
 	return hosts
 }
 
-// returns a random host (and corresponding port) from a slice of DNS records
-func getRandomHostPort(records []dns.SrvRecord) (string, int) {
+// returns a host (and corresponding port) from a slice of DNS records
+func getHostFromSrv(records []dns.SrvRecord) string {
 	rand.Seed(time.Now().Unix())
 	srvRecord := records[rand.Intn(len(records))]
-	return srvRecord.Host, srvRecord.Port
+	return net.JoinHostPort(srvRecord.Host, fmt.Sprintf("%d", srvRecord.Port))
 }
 
 // IsCompressed returns true if the object is marked as compressed.
@@ -484,7 +487,6 @@ func NewGetObjectReader(rs *HTTPRangeSpec, oi ObjectInfo, cleanUpFns ...func()) 
 		// encrypted bytes. The header parameter is used to
 		// provide encryption parameters.
 		fn = func(inputReader io.Reader, h http.Header, cFns ...func()) (r *GetObjectReader, err error) {
-
 			copySource := h.Get(crypto.SSECopyAlgorithm) != ""
 
 			cFns = append(cleanUpFns, cFns...)
@@ -499,6 +501,9 @@ func NewGetObjectReader(rs *HTTPRangeSpec, oi ObjectInfo, cleanUpFns ...func()) 
 				}
 				return nil, err
 			}
+
+			// Decrypt the ETag before top layer consumes this value.
+			oi.ETag = getDecryptedETag(h, oi, copySource)
 
 			// Apply the skipLen and limit on the
 			// decrypted stream
@@ -571,7 +576,6 @@ func NewGetObjectReader(rs *HTTPRangeSpec, oi ObjectInfo, cleanUpFns ...func()) 
 			return r, nil
 		}
 	}
-
 	return fn, off, length, nil
 }
 
@@ -596,4 +600,78 @@ func (g *GetObjectReader) Read(p []byte) (n int, err error) {
 		g.Close()
 	}
 	return
+}
+
+//SealMD5CurrFn seals md5sum with object encryption key and returns sealed
+// md5sum
+type SealMD5CurrFn func([]byte) []byte
+
+// PutObjReader is a type that wraps sio.EncryptReader and
+// underlying hash.Reader in a struct
+type PutObjReader struct {
+	*hash.Reader              // actual data stream
+	rawReader    *hash.Reader // original data stream
+	sealMD5Fn    SealMD5CurrFn
+}
+
+// Size returns the absolute number of bytes the Reader
+// will return during reading. It returns -1 for unlimited
+// data.
+func (p *PutObjReader) Size() int64 {
+	return p.Reader.Size()
+}
+
+// MD5CurrentHexString returns the current MD5Sum or encrypted MD5Sum
+// as a hex encoded string
+func (p *PutObjReader) MD5CurrentHexString() string {
+	md5sumCurr := p.rawReader.MD5Current()
+	if p.sealMD5Fn != nil {
+		md5sumCurr = p.sealMD5Fn(md5sumCurr)
+	}
+	return hex.EncodeToString(md5sumCurr)
+}
+
+// NewPutObjReader returns a new PutObjReader and holds
+// reference to underlying data stream from client and the encrypted
+// data reader
+func NewPutObjReader(rawReader *hash.Reader, encReader *hash.Reader, encKey []byte) *PutObjReader {
+	p := PutObjReader{Reader: rawReader, rawReader: rawReader}
+
+	if len(encKey) != 0 && encReader != nil {
+		var objKey crypto.ObjectKey
+		copy(objKey[:], encKey)
+		p.sealMD5Fn = sealETagFn(objKey)
+		p.Reader = encReader
+	}
+
+	return &p
+}
+
+func sealETag(encKey crypto.ObjectKey, md5CurrSum []byte) []byte {
+	var emptyKey [32]byte
+	if bytes.Equal(encKey[:], emptyKey[:]) {
+		return md5CurrSum
+	}
+	return encKey.SealETag(md5CurrSum)
+}
+
+func sealETagFn(key crypto.ObjectKey) SealMD5CurrFn {
+	fn := func(md5sumcurr []byte) []byte {
+		return sealETag(key, md5sumcurr)
+	}
+	return fn
+}
+
+// CleanMinioInternalMetadataKeys removes X-Amz-Meta- prefix from minio internal
+// encryption metadata that was sent by minio gateway
+func CleanMinioInternalMetadataKeys(metadata map[string]string) map[string]string {
+	var newMeta = make(map[string]string, len(metadata))
+	for k, v := range metadata {
+		if strings.HasPrefix(k, "X-Amz-Meta-X-Minio-Internal-") {
+			newMeta[strings.TrimPrefix(k, "X-Amz-Meta-")] = v
+		} else {
+			newMeta[k] = v
+		}
+	}
+	return newMeta
 }

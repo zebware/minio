@@ -1,5 +1,5 @@
 /*
- * Minio Cloud Storage, (C) 2018 Minio, Inc.
+ * Minio Cloud Storage, (C) 2019 Minio, Inc.
  *
  * Licensed under the Apache License, Version 2.0 (the "License");
  * you may not use this file except in compliance with the License.
@@ -17,492 +17,203 @@
 package s3select
 
 import (
-	"fmt"
+	"bytes"
+	"go/build"
+	"io"
+	"io/ioutil"
+	"net/http"
+	"os"
+	"path"
 	"reflect"
 	"testing"
-
-	"github.com/minio/minio/pkg/s3select/format"
 )
 
-// Unit Test for the checkForDuplicates function.
-func TestCheckForDuplicates(t *testing.T) {
-	tables := []struct {
-		myReq     []string
-		myHeaders map[string]int
-		myDup     map[string]bool
-		myLow     map[string]int
-		myErr     error
-	}{
-		{[]string{"name", "id", "last_name", "last_name"}, make(map[string]int), make(map[string]bool), make(map[string]int), ErrAmbiguousFieldName},
-		{[]string{"name", "id", "last_name", "another_name"}, make(map[string]int), make(map[string]bool), make(map[string]int), nil},
+type testResponseWriter struct {
+	statusCode int
+	response   []byte
+}
+
+func (w *testResponseWriter) Header() http.Header {
+	return nil
+}
+
+func (w *testResponseWriter) Write(p []byte) (int, error) {
+	w.response = append(w.response, p...)
+	return len(p), nil
+}
+
+func (w *testResponseWriter) WriteHeader(statusCode int) {
+	w.statusCode = statusCode
+}
+
+func (w *testResponseWriter) Flush() {
+}
+
+func TestCSVInput(t *testing.T) {
+	var requestXML = []byte(`
+<?xml version="1.0" encoding="UTF-8"?>
+<SelectObjectContentRequest>
+    <Expression>SELECT one, two, three from S3Object</Expression>
+    <ExpressionType>SQL</ExpressionType>
+    <InputSerialization>
+        <CompressionType>NONE</CompressionType>
+        <CSV>
+            <FileHeaderInfo>USE</FileHeaderInfo>
+        </CSV>
+    </InputSerialization>
+    <OutputSerialization>
+        <CSV>
+        </CSV>
+    </OutputSerialization>
+    <RequestProgress>
+        <Enabled>FALSE</Enabled>
+    </RequestProgress>
+</SelectObjectContentRequest>
+`)
+
+	var csvData = []byte(`one,two,three
+-1,foo,true
+,bar,false
+2.5,baz,true
+`)
+
+	var expectedResult = []byte{
+		0, 0, 0, 137, 0, 0, 0, 85, 194, 213, 168, 241, 13, 58, 109, 101, 115, 115, 97, 103, 101, 45, 116, 121, 112, 101, 7, 0, 5, 101, 118, 101, 110, 116, 13, 58, 99, 111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 24, 97, 112, 112, 108, 105, 99, 97, 116, 105, 111, 110, 47, 111, 99, 116, 101, 116, 45, 115, 116, 114, 101, 97, 109, 11, 58, 101, 118, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 7, 82, 101, 99, 111, 114, 100, 115, 45, 49, 44, 102, 111, 111, 44, 116, 114, 117, 101, 10, 44, 98, 97, 114, 44, 102, 97, 108, 115, 101, 10, 50, 46, 53, 44, 98, 97, 122, 44, 116, 114, 117, 101, 10, 75, 182, 193, 80, 0, 0, 0, 235, 0, 0, 0, 67, 213, 243, 57, 141, 13, 58, 109, 101, 115, 115, 97, 103, 101, 45, 116, 121, 112, 101, 7, 0, 5, 101, 118, 101, 110, 116, 13, 58, 99, 111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 8, 116, 101, 120, 116, 47, 120, 109, 108, 11, 58, 101, 118, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 5, 83, 116, 97, 116, 115, 60, 63, 120, 109, 108, 32, 118, 101, 114, 115, 105, 111, 110, 61, 34, 49, 46, 48, 34, 32, 101, 110, 99, 111, 100, 105, 110, 103, 61, 34, 85, 84, 70, 45, 56, 34, 63, 62, 60, 83, 116, 97, 116, 115, 62, 60, 66, 121, 116, 101, 115, 83, 99, 97, 110, 110, 101, 100, 62, 53, 48, 60, 47, 66, 121, 116, 101, 115, 83, 99, 97, 110, 110, 101, 100, 62, 60, 66, 121, 116, 101, 115, 80, 114, 111, 99, 101, 115, 115, 101, 100, 62, 53, 48, 60, 47, 66, 121, 116, 101, 115, 80, 114, 111, 99, 101, 115, 115, 101, 100, 62, 60, 66, 121, 116, 101, 115, 82, 101, 116, 117, 114, 110, 101, 100, 62, 51, 54, 60, 47, 66, 121, 116, 101, 115, 82, 101, 116, 117, 114, 110, 101, 100, 62, 60, 47, 83, 116, 97, 116, 115, 62, 253, 105, 8, 216, 0, 0, 0, 56, 0, 0, 0, 40, 193, 198, 132, 212, 13, 58, 109, 101, 115, 115, 97, 103, 101, 45, 116, 121, 112, 101, 7, 0, 5, 101, 118, 101, 110, 116, 11, 58, 101, 118, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 3, 69, 110, 100, 207, 151, 211, 146,
 	}
 
-	for _, table := range tables {
-		err := checkForDuplicates(table.myReq, table.myHeaders, table.myDup, table.myLow)
-		if err != table.myErr {
-			t.Error()
-		}
+	s3Select, err := NewS3Select(bytes.NewReader(requestXML))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err = s3Select.Open(func(offset, length int64) (io.ReadCloser, error) {
+		return ioutil.NopCloser(bytes.NewReader(csvData)), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &testResponseWriter{}
+	s3Select.Evaluate(w)
+	s3Select.Close()
+
+	if !reflect.DeepEqual(w.response, expectedResult) {
+		t.Fatalf("received response does not match with expected reply")
 	}
 }
 
-// This function returns the index of a string in a list
-func stringIndex(a string, list []string) int {
-	for i, v := range list {
-		if v == a {
-			return i
-		}
-	}
-	return -1
-}
+func TestJSONInput(t *testing.T) {
+	var requestXML = []byte(`
+<?xml version="1.0" encoding="UTF-8"?>
+<SelectObjectContentRequest>
+    <Expression>SELECT one, two, three from S3Object</Expression>
+    <ExpressionType>SQL</ExpressionType>
+    <InputSerialization>
+        <CompressionType>NONE</CompressionType>
+        <JSON>
+            <Type>DOCUMENT</Type>
+        </JSON>
+    </InputSerialization>
+    <OutputSerialization>
+        <CSV>
+        </CSV>
+    </OutputSerialization>
+    <RequestProgress>
+        <Enabled>FALSE</Enabled>
+    </RequestProgress>
+</SelectObjectContentRequest>
+`)
 
-// TestMyHelperFunctions is a unit test which tests some small helper string
-// functions.
-func TestMyHelperFunctions(t *testing.T) {
-	tables := []struct {
-		myReq    string
-		myList   []string
-		myIndex  int
-		expected bool
-	}{
-		{"test1", []string{"test1", "test2", "test3", "test4", "test5"}, 0, true},
-		{"random", []string{"test1", "test2", "test3", "test4", "test5"}, -1, false},
-		{"test3", []string{"test1", "test2", "test3", "test4", "test5"}, 2, true},
-	}
-	for _, table := range tables {
-		if format.StringInSlice(table.myReq, table.myList) != table.expected {
-			t.Error()
-		}
-		if stringIndex(table.myReq, table.myList) != table.myIndex {
-			t.Error()
-		}
-	}
-}
+	var jsonData = []byte(`{"three":true,"two":"foo","one":-1}
+{"three":false,"two":"bar","one":null}
+{"three":true,"two":"baz","one":2.5}
+`)
 
-// TestMyStateMachine is a unit test which ensures that the lowest level of the
-// interpreter is converting properly.
-func TestMyStateMachine(t *testing.T) {
-	tables := []struct {
-		operand  interface{}
-		operator string
-		leftArg  string
-		err      error
-		expected bool
-	}{
-		{"2005", ">", "2012", nil, true},
-		{2005, ">", "2012", nil, true},
-		{2012.0000, ">", "2014.000", nil, true},
-		{"NA", ">", "2014.000", nil, false},
-		{2014, ">", "Random", nil, false},
-		{"test3", ">", "aandom", nil, false},
+	var expectedResult = []byte{
+		0, 0, 0, 137, 0, 0, 0, 85, 194, 213, 168, 241, 13, 58, 109, 101, 115, 115, 97, 103, 101, 45, 116, 121, 112, 101, 7, 0, 5, 101, 118, 101, 110, 116, 13, 58, 99, 111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 24, 97, 112, 112, 108, 105, 99, 97, 116, 105, 111, 110, 47, 111, 99, 116, 101, 116, 45, 115, 116, 114, 101, 97, 109, 11, 58, 101, 118, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 7, 82, 101, 99, 111, 114, 100, 115, 45, 49, 44, 102, 111, 111, 44, 116, 114, 117, 101, 10, 44, 98, 97, 114, 44, 102, 97, 108, 115, 101, 10, 50, 46, 53, 44, 98, 97, 122, 44, 116, 114, 117, 101, 10, 75, 182, 193, 80, 0, 0, 0, 237, 0, 0, 0, 67, 90, 179, 204, 45, 13, 58, 109, 101, 115, 115, 97, 103, 101, 45, 116, 121, 112, 101, 7, 0, 5, 101, 118, 101, 110, 116, 13, 58, 99, 111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 8, 116, 101, 120, 116, 47, 120, 109, 108, 11, 58, 101, 118, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 5, 83, 116, 97, 116, 115, 60, 63, 120, 109, 108, 32, 118, 101, 114, 115, 105, 111, 110, 61, 34, 49, 46, 48, 34, 32, 101, 110, 99, 111, 100, 105, 110, 103, 61, 34, 85, 84, 70, 45, 56, 34, 63, 62, 60, 83, 116, 97, 116, 115, 62, 60, 66, 121, 116, 101, 115, 83, 99, 97, 110, 110, 101, 100, 62, 49, 49, 50, 60, 47, 66, 121, 116, 101, 115, 83, 99, 97, 110, 110, 101, 100, 62, 60, 66, 121, 116, 101, 115, 80, 114, 111, 99, 101, 115, 115, 101, 100, 62, 49, 49, 50, 60, 47, 66, 121, 116, 101, 115, 80, 114, 111, 99, 101, 115, 115, 101, 100, 62, 60, 66, 121, 116, 101, 115, 82, 101, 116, 117, 114, 110, 101, 100, 62, 51, 54, 60, 47, 66, 121, 116, 101, 115, 82, 101, 116, 117, 114, 110, 101, 100, 62, 60, 47, 83, 116, 97, 116, 115, 62, 181, 40, 50, 250, 0, 0, 0, 56, 0, 0, 0, 40, 193, 198, 132, 212, 13, 58, 109, 101, 115, 115, 97, 103, 101, 45, 116, 121, 112, 101, 7, 0, 5, 101, 118, 101, 110, 116, 11, 58, 101, 118, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 3, 69, 110, 100, 207, 151, 211, 146,
 	}
-	for _, table := range tables {
-		val, err := evaluateOperator(table.leftArg, table.operator, table.operand)
-		if err != table.err {
-			t.Error()
-		}
-		if val != table.expected {
-			t.Error()
-		}
+
+	s3Select, err := NewS3Select(bytes.NewReader(requestXML))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err = s3Select.Open(func(offset, length int64) (io.ReadCloser, error) {
+		return ioutil.NopCloser(bytes.NewReader(jsonData)), nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &testResponseWriter{}
+	s3Select.Evaluate(w)
+	s3Select.Close()
+
+	if !reflect.DeepEqual(w.response, expectedResult) {
+		t.Fatalf("received response does not match with expected reply")
 	}
 }
 
-// TestMyOperators is a unit test which ensures that the appropriate values are
-// being returned from the operators functions.
-func TestMyOperators(t *testing.T) {
-	tables := []struct {
-		operator string
-		err      error
-	}{
-		{">", nil},
-		{"%", ErrParseUnknownOperator},
-	}
-	for _, table := range tables {
-		err := checkValidOperator(table.operator)
-		if err != table.err {
-			t.Error()
-		}
-	}
-}
+func TestParquetInput(t *testing.T) {
+	var requestXML = []byte(`
+<?xml version="1.0" encoding="UTF-8"?>
+<SelectObjectContentRequest>
+    <Expression>SELECT one, two, three from S3Object</Expression>
+    <ExpressionType>SQL</ExpressionType>
+    <InputSerialization>
+        <CompressionType>NONE</CompressionType>
+        <Parquet>
+        </Parquet>
+    </InputSerialization>
+    <OutputSerialization>
+        <CSV>
+        </CSV>
+    </OutputSerialization>
+    <RequestProgress>
+        <Enabled>FALSE</Enabled>
+    </RequestProgress>
+</SelectObjectContentRequest>
+`)
 
-// TestMyConversion ensures that the conversion of the value from the csv
-// happens correctly.
-func TestMyConversion(t *testing.T) {
-	tables := []struct {
-		myTblVal string
-		expected reflect.Kind
-	}{
-		{"2014", reflect.Int},
-		{"2014.000", reflect.Float64},
-		{"String!!!", reflect.String},
-	}
-	for _, table := range tables {
-		val := reflect.ValueOf(checkStringType(table.myTblVal)).Kind()
-		if val != table.expected {
-			t.Error()
-		}
-	}
-}
-
-// Unit tests for the main function that performs aggreggation.
-func TestMyAggregationFunc(t *testing.T) {
-	columnsMap := make(map[string]int)
-	columnsMap["Col1"] = 0
-	columnsMap["Col2"] = 1
-	tables := []struct {
-		counter        int
-		filtrCount     int
-		myAggVals      []float64
-		columnsMap     map[string]int
-		storeReqCols   []string
-		storeFunctions []string
-		record         string
-		err            error
-		expectedVal    float64
-	}{
-		{10, 5, []float64{10, 11, 12, 13, 14}, columnsMap, []string{"Col1"}, []string{"count"}, "{\"Col1\":\"1\",\"Col2\":\"2\"}", nil, 11},
-		{10, 5, []float64{10}, columnsMap, []string{"Col1"}, []string{"min"}, "{\"Col1\":\"1\",\"Col2\":\"2\"}", nil, 1},
-		{10, 5, []float64{10}, columnsMap, []string{"Col1"}, []string{"max"}, "{\"Col1\":\"1\",\"Col2\":\"2\"}", nil, 10},
-		{10, 5, []float64{10}, columnsMap, []string{"Col1"}, []string{"sum"}, "{\"Col1\":\"1\",\"Col2\":\"2\"}", nil, 11},
-		{1, 1, []float64{10}, columnsMap, []string{"Col1"}, []string{"avg"}, "{\"Col1\":\"1\",\"Col2\":\"2\"}", nil, 5.500},
-		{10, 5, []float64{0.0000}, columnsMap, []string{"Col1"}, []string{"random"}, "{\"Col1\":\"1\",\"Col2\":\"2\"}", ErrParseNonUnaryAgregateFunctionCall, 0},
-		{0, 5, []float64{0}, columnsMap, []string{"0"}, []string{"count"}, "{\"Col1\":\"1\",\"Col2\":\"2\"}", nil, 1},
-		{10, 5, []float64{10}, columnsMap, []string{"1"}, []string{"min"}, "{\"_1\":\"1\",\"_2\":\"2\"}", nil, 1},
-	}
-
-	for _, table := range tables {
-		err := aggregationFunctions(table.counter, table.filtrCount, table.myAggVals, table.storeReqCols, table.storeFunctions, table.record)
-		if table.err != err {
-			t.Error()
-		}
-		if table.myAggVals[0] != table.expectedVal {
-			t.Error()
-		}
-
-	}
-}
-
-// TestMyStringComparator is a unit test which ensures that the appropriate
-// values are being compared for strings.
-func TestMyStringComparator(t *testing.T) {
-	tables := []struct {
-		operand  string
-		operator string
-		myVal    string
-		expected bool
-		err      error
-	}{
-		{"random", ">", "myName", "random" > "myName", nil},
-		{"12", "!=", "myName", "12" != "myName", nil},
-		{"12", "=", "myName", "12" == "myName", nil},
-		{"12", "<=", "myName", "12" <= "myName", nil},
-		{"12", ">=", "myName", "12" >= "myName", nil},
-		{"12", "<", "myName", "12" < "myName", nil},
-		{"name", "like", "_x%", false, nil},
-		{"12", "randomoperator", "myName", false, ErrUnsupportedSyntax},
-	}
-	for _, table := range tables {
-		myVal, err := stringEval(table.operand, table.operator, table.myVal)
-		if err != table.err {
-			t.Error()
-		}
-		if myVal != table.expected {
-			t.Error()
-		}
-	}
-}
-
-// TestMyFloatComparator is a unit test which ensures that the appropriate
-// values are being compared for floats.
-func TestMyFloatComparator(t *testing.T) {
-	tables := []struct {
-		operand  float64
-		operator string
-		myVal    float64
-		expected bool
-		err      error
-	}{
-		{12.000, ">", 13.000, 12.000 > 13.000, nil},
-		{1000.000, "!=", 1000.000, 1000.000 != 1000.000, nil},
-		{1000.000, "<", 1000.000, 1000.000 < 1000.000, nil},
-		{1000.000, "<=", 1000.000, 1000.000 <= 1000.000, nil},
-		{1000.000, ">=", 1000.000, 1000.000 >= 1000.000, nil},
-		{1000.000, "=", 1000.000, 1000.000 == 1000.000, nil},
-		{17.000, "randomoperator", 0.0, false, ErrUnsupportedSyntax},
-	}
-	for _, table := range tables {
-		myVal, err := floatEval(table.operand, table.operator, table.myVal)
-		if err != table.err {
-			t.Error()
-		}
-		if myVal != table.expected {
-			t.Error()
-		}
-	}
-}
-
-// TestMyIntComparator is a unit test which ensures that the appropriate values
-// are being compared for ints.
-func TestMyIntComparator(t *testing.T) {
-	tables := []struct {
-		operand  int64
-		operator string
-		myVal    int64
-		expected bool
-		err      error
-	}{
-		{12, ">", 13, 12.000 > 13.000, nil},
-		{1000, "!=", 1000, 1000.000 != 1000.000, nil},
-		{1000, "<", 1000, 1000.000 < 1000.000, nil},
-		{1000, "<=", 1000, 1000.000 <= 1000.000, nil},
-		{1000, ">=", 1000, 1000.000 >= 1000.000, nil},
-		{1000, "=", 1000, 1000.000 >= 1000.000, nil},
-		{17, "randomoperator", 0, false, ErrUnsupportedSyntax},
-	}
-	for _, table := range tables {
-		myVal, err := intEval(table.operand, table.operator, table.myVal)
-		if err != table.err {
-			t.Error()
-		}
-		if myVal != table.expected {
-			t.Error()
-		}
-	}
-}
-
-// TestMySizeFunction is a function which provides unit testing for the function
-// which calculates size.
-func TestMySizeFunction(t *testing.T) {
-	tables := []struct {
-		myRecord []string
-		expected int64
-	}{
-		{[]string{"test1", "test2", "test3", "test4", "test5"}, 30},
-	}
-	for _, table := range tables {
-		if format.ProcessSize(table.myRecord) != table.expected {
-			t.Error()
-		}
-
-	}
-}
-
-func TestMatch(t *testing.T) {
-	testCases := []struct {
-		pattern string
-		text    string
-		matched bool
-	}{
-		// Test case - 1.
-		// Test case so that the match occurs on the opening letter.
-		{
-			pattern: "a%",
-			text:    "apple",
-			matched: true,
-		},
-		// Test case - 2.
-		// Test case so that the ending letter is true.
-		{
-			pattern: "%m",
-			text:    "random",
-			matched: true,
-		},
-		// Test case - 3.
-		// Test case so that a character is at the appropriate position.
-		{
-			pattern: "_d%",
-			text:    "adam",
-			matched: true,
-		},
-		// Test case - 4.
-		// Test case so that a character is at the appropriate position.
-		{
-			pattern: "_d%",
-			text:    "apple",
-			matched: false,
-		},
-		// Test case - 5.
-		// Test case with checking that it is at least 3 in length
-		{
-			pattern: "a_%_%",
-			text:    "ap",
-			matched: false,
-		},
-		{
-			pattern: "a_%_%",
-			text:    "apple",
-			matched: true,
-		},
-		{
-			pattern: "%or%",
-			text:    "orphan",
-			matched: true,
-		},
-		{
-			pattern: "%or%",
-			text:    "dolphin",
-			matched: false,
-		},
-		{
-			pattern: "%or%",
-			text:    "dorlphin",
-			matched: true,
-		},
-		{
-			pattern: "2__3",
-			text:    "2003",
-			matched: true,
-		},
-		{
-			pattern: "_YYYY_",
-			text:    "aYYYYa",
-			matched: true,
-		},
-		{
-			pattern: "C%",
-			text:    "CA",
-			matched: true,
-		},
-		{
-			pattern: "C%",
-			text:    "SC",
-			matched: false,
-		},
-		{
-			pattern: "%C",
-			text:    "SC",
-			matched: true,
-		},
-		{
-			pattern: "%C",
-			text:    "CA",
-			matched: false,
-		},
-		{
-			pattern: "%C",
-			text:    "ACCC",
-			matched: true,
-		},
-		{
-			pattern: "C%",
-			text:    "CCC",
-			matched: true,
-		},
-		{
-			pattern: "j%",
-			text:    "mejri",
-			matched: false,
-		},
-		{
-			pattern: "a%o",
-			text:    "ando",
-			matched: true,
-		},
-		{
-			pattern: "%j",
-			text:    "mejri",
-			matched: false,
-		},
-		{
-			pattern: "%ja",
-			text:    "mejrija",
-			matched: true,
-		},
-		{
-			pattern: "ja%",
-			text:    "jamal",
-			matched: true,
-		},
-		{
-			pattern: "a%o",
-			text:    "andp",
-			matched: false,
-		},
-		{
-			pattern: "_r%",
-			text:    "arpa",
-			matched: true,
-		},
-		{
-			pattern: "_r%",
-			text:    "apra",
-			matched: false,
-		},
-		{
-			pattern: "a_%_%",
-			text:    "appple",
-			matched: true,
-		},
-		{
-			pattern: "l_b%",
-			text:    "lebron",
-			matched: true,
-		},
-		{
-			pattern: "leb%",
-			text:    "Dalembert",
-			matched: false,
-		},
-		{
-			pattern: "leb%",
-			text:    "Landesberg",
-			matched: false,
-		},
-		{
-			pattern: "leb%",
-			text:    "Mccalebb",
-			matched: false,
-		},
-		{
-			pattern: "%lebb",
-			text:    "Mccalebb",
-			matched: true,
-		},
-	}
-	// Iterating over the test cases, call the function under test and asert the output.
-	for i, testCase := range testCases {
-		actualResult, err := likeConvert(testCase.pattern, testCase.text)
+	getReader := func(offset int64, length int64) (io.ReadCloser, error) {
+		testdataFile := path.Join(build.Default.GOPATH, "src/github.com/minio/minio/pkg/s3select/testdata.parquet")
+		file, err := os.Open(testdataFile)
 		if err != nil {
-			t.Error()
-		}
-		if testCase.matched != actualResult {
-			fmt.Println("Expected Pattern", testCase.pattern, "Expected Text", testCase.text)
-			t.Errorf("Test %d: Expected the result to be `%v`, but instead found it to be `%v`", i+1, testCase.matched, actualResult)
-		}
-	}
-}
-
-// TestMyFuncProcessing is a unit test which ensures that the appropriate values are
-// being returned from the Processing... functions.
-func TestMyFuncProcessing(t *testing.T) {
-	tables := []struct {
-		myString    string
-		nullList    []string
-		coalList    []string
-		myValString string
-		myValCoal   string
-		myValNull   string
-		stringFunc  string
-	}{
-		{"lower", []string{"yo", "yo"}, []string{"random", "hello", "random"}, "LOWER", "random", "", "UPPER"},
-		{"LOWER", []string{"null", "random"}, []string{"missing", "hello", "random"}, "lower", "hello", "null", "LOWER"},
-	}
-	for _, table := range tables {
-		if table.coalList != nil {
-			myVal := processCoalNoIndex(table.coalList)
-			if myVal != table.myValCoal {
-				t.Error()
-			}
-		}
-		if table.nullList != nil {
-			myVal := processNullIf(table.nullList)
-			if myVal != table.myValNull {
-				t.Error()
-			}
-		}
-		myVal := applyStrFunc(table.myString, table.stringFunc)
-		if myVal != table.myValString {
-			t.Error()
+			return nil, err
 		}
 
+		fi, err := file.Stat()
+		if err != nil {
+			return nil, err
+		}
+
+		if offset < 0 {
+			offset = fi.Size() + offset
+		}
+
+		if _, err = file.Seek(offset, os.SEEK_SET); err != nil {
+			return nil, err
+		}
+
+		return file, nil
+	}
+
+	var expectedResult = []byte{
+		0, 0, 0, 137, 0, 0, 0, 85, 194, 213, 168, 241, 13, 58, 109, 101, 115, 115, 97, 103, 101, 45, 116, 121, 112, 101, 7, 0, 5, 101, 118, 101, 110, 116, 13, 58, 99, 111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 24, 97, 112, 112, 108, 105, 99, 97, 116, 105, 111, 110, 47, 111, 99, 116, 101, 116, 45, 115, 116, 114, 101, 97, 109, 11, 58, 101, 118, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 7, 82, 101, 99, 111, 114, 100, 115, 45, 49, 44, 102, 111, 111, 44, 116, 114, 117, 101, 10, 44, 98, 97, 114, 44, 102, 97, 108, 115, 101, 10, 50, 46, 53, 44, 98, 97, 122, 44, 116, 114, 117, 101, 10, 75, 182, 193, 80, 0, 0, 0, 235, 0, 0, 0, 67, 213, 243, 57, 141, 13, 58, 109, 101, 115, 115, 97, 103, 101, 45, 116, 121, 112, 101, 7, 0, 5, 101, 118, 101, 110, 116, 13, 58, 99, 111, 110, 116, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 8, 116, 101, 120, 116, 47, 120, 109, 108, 11, 58, 101, 118, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 5, 83, 116, 97, 116, 115, 60, 63, 120, 109, 108, 32, 118, 101, 114, 115, 105, 111, 110, 61, 34, 49, 46, 48, 34, 32, 101, 110, 99, 111, 100, 105, 110, 103, 61, 34, 85, 84, 70, 45, 56, 34, 63, 62, 60, 83, 116, 97, 116, 115, 62, 60, 66, 121, 116, 101, 115, 83, 99, 97, 110, 110, 101, 100, 62, 45, 49, 60, 47, 66, 121, 116, 101, 115, 83, 99, 97, 110, 110, 101, 100, 62, 60, 66, 121, 116, 101, 115, 80, 114, 111, 99, 101, 115, 115, 101, 100, 62, 45, 49, 60, 47, 66, 121, 116, 101, 115, 80, 114, 111, 99, 101, 115, 115, 101, 100, 62, 60, 66, 121, 116, 101, 115, 82, 101, 116, 117, 114, 110, 101, 100, 62, 51, 54, 60, 47, 66, 121, 116, 101, 115, 82, 101, 116, 117, 114, 110, 101, 100, 62, 60, 47, 83, 116, 97, 116, 115, 62, 128, 96, 253, 66, 0, 0, 0, 56, 0, 0, 0, 40, 193, 198, 132, 212, 13, 58, 109, 101, 115, 115, 97, 103, 101, 45, 116, 121, 112, 101, 7, 0, 5, 101, 118, 101, 110, 116, 11, 58, 101, 118, 101, 110, 116, 45, 116, 121, 112, 101, 7, 0, 3, 69, 110, 100, 207, 151, 211, 146,
+	}
+
+	s3Select, err := NewS3Select(bytes.NewReader(requestXML))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err = s3Select.Open(getReader); err != nil {
+		t.Fatal(err)
+	}
+
+	w := &testResponseWriter{}
+	s3Select.Evaluate(w)
+	s3Select.Close()
+
+	if !reflect.DeepEqual(w.response, expectedResult) {
+		t.Fatalf("received response does not match with expected reply")
 	}
 }

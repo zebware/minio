@@ -14,40 +14,32 @@ checks:
 
 getdeps:
 	@echo "Installing golint" && go get -u golang.org/x/lint/golint
-	@echo "Installing gocyclo" && go get -u github.com/fzipp/gocyclo
-	@echo "Installing deadcode" && go get -u github.com/remyoudompheng/go-misc/deadcode
+	@echo "Installing staticcheck" && go get -u honnef.co/go/tools/...
 	@echo "Installing misspell" && go get -u github.com/client9/misspell/cmd/misspell
-	@echo "Installing ineffassign" && go get -u github.com/gordonklaus/ineffassign
 
-verifiers: getdeps vet fmt lint cyclo deadcode spelling
+crosscompile:
+	@(env bash $(PWD)/buildscripts/cross-compile.sh)
+
+verifiers: getdeps vet fmt lint staticcheck spelling
 
 vet:
 	@echo "Running $@"
-	@go tool vet -atomic -bool -copylocks -nilfunc -printf -shadow -rangeloops -unreachable -unsafeptr -unusedresult cmd
-	@go tool vet -atomic -bool -copylocks -nilfunc -printf -shadow -rangeloops -unreachable -unsafeptr -unusedresult pkg
+	@go vet github.com/minio/minio/...
 
 fmt:
 	@echo "Running $@"
-	@gofmt -d cmd
-	@gofmt -d pkg
+	@gofmt -d cmd/
+	@gofmt -d pkg/
 
 lint:
 	@echo "Running $@"
-	@${GOPATH}/bin/golint -set_exit_status github.com/minio/minio/cmd...
-	@${GOPATH}/bin/golint -set_exit_status github.com/minio/minio/pkg...
+	@${GOPATH}/bin/golint -set_exit_status github.com/minio/minio/cmd/...
+	@${GOPATH}/bin/golint -set_exit_status github.com/minio/minio/pkg/...
 
-ineffassign:
+staticcheck:
 	@echo "Running $@"
-	@${GOPATH}/bin/ineffassign .
-
-cyclo:
-	@echo "Running $@"
-	@${GOPATH}/bin/gocyclo -over 200 cmd
-	@${GOPATH}/bin/gocyclo -over 200 pkg
-
-deadcode:
-	@echo "Running $@"
-	@${GOPATH}/bin/deadcode -test $(shell go list ./...) || true
+	@${GOPATH}/bin/staticcheck github.com/minio/minio/cmd/...
+	@${GOPATH}/bin/staticcheck github.com/minio/minio/pkg/...
 
 spelling:
 	@${GOPATH}/bin/misspell -locale US -error `find cmd/`
@@ -60,7 +52,7 @@ spelling:
 check: test
 test: verifiers build
 	@echo "Running unit tests"
-	@go test $(GOFLAGS) -tags kqueue ./...
+	@CGO_ENABLED=0 go test -tags kqueue ./...
 
 verify: build
 	@echo "Verifying build"
@@ -73,7 +65,8 @@ coverage: build
 # Builds minio locally.
 build: checks
 	@echo "Building minio binary to './minio'"
-	@CGO_ENABLED=0 go build -tags kqueue --ldflags $(BUILD_LDFLAGS) -o $(PWD)/minio
+	@GOFLAGS="" CGO_ENABLED=0 go build -tags kqueue --ldflags $(BUILD_LDFLAGS) -o $(PWD)/minio
+	@GOFLAGS="" CGO_ENABLED=0 go build -tags kqueue --ldflags="-s -w" -o $(PWD)/dockerscripts/healthcheck $(PWD)/dockerscripts/healthcheck.go
 
 docker: build
 	@docker build -t $(TAG) . -f Dockerfile.dev
@@ -102,6 +95,7 @@ install: build
 clean:
 	@echo "Cleaning up all the generated files"
 	@find . -name '*.test' | xargs rm -fv
+	@find . -name '*~' | xargs rm -fv
 	@rm -rvf minio
 	@rm -rvf build
 	@rm -rvf release

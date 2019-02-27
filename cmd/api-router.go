@@ -26,21 +26,26 @@ import (
 type objectAPIHandlers struct {
 	ObjectAPI func() ObjectLayer
 	CacheAPI  func() CacheObjectLayer
+	// Returns true of handlers should interpret encryption.
+	EncryptionEnabled func() bool
 }
 
 // registerAPIRouter - registers S3 compatible APIs.
-func registerAPIRouter(router *mux.Router) {
+func registerAPIRouter(router *mux.Router, encryptionEnabled bool) {
 	// Initialize API.
 	api := objectAPIHandlers{
 		ObjectAPI: newObjectLayerFn,
 		CacheAPI:  newCacheObjectsFn,
+		EncryptionEnabled: func() bool {
+			return encryptionEnabled
+		},
 	}
 
 	// API Router
 	apiRouter := router.PathPrefix("/").Subrouter()
 	var routers []*mux.Router
-	if globalDomainName != "" {
-		routers = append(routers, apiRouter.Host("{bucket:.+}."+globalDomainName).Subrouter())
+	for _, domainName := range globalDomainNames {
+		routers = append(routers, apiRouter.Host("{bucket:.+}."+domainName).Subrouter())
 	}
 	routers = append(routers, apiRouter.PathPrefix("/{bucket}").Subrouter())
 
@@ -62,6 +67,8 @@ func registerAPIRouter(router *mux.Router) {
 		bucket.Methods("DELETE").Path("/{object:.+}").HandlerFunc(httpTraceAll(api.AbortMultipartUploadHandler)).Queries("uploadId", "{uploadId:.*}")
 		// GetObjectACL - this is a dummy call.
 		bucket.Methods("GET").Path("/{object:.+}").HandlerFunc(httpTraceHdrs(api.GetObjectACLHandler)).Queries("acl", "")
+		// GetObjectTagging - this is a dummy call.
+		bucket.Methods("GET").Path("/{object:.+}").HandlerFunc(httpTraceHdrs(api.GetObjectTaggingHandler)).Queries("tagging", "")
 		// SelectObjectContent
 		bucket.Methods("POST").Path("/{object:.+}").HandlerFunc(httpTraceHdrs(api.SelectObjectContentHandler)).Queries("select", "").Queries("select-type", "2")
 		// GetObject
@@ -79,8 +86,31 @@ func registerAPIRouter(router *mux.Router) {
 		// GetBucketPolicy
 		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketPolicyHandler)).Queries("policy", "")
 
+		// Dummy Bucket Calls
 		// GetBucketACL -- this is a dummy call.
 		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketACLHandler)).Queries("acl", "")
+		// GetBucketCors - this is a dummy call.
+		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketCorsHandler)).Queries("cors", "")
+		// GetBucketWebsiteHandler - this is a dummy call.
+		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketWebsiteHandler)).Queries("website", "")
+		// GetBucketVersioningHandler - this is a dummy call.
+		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketVersioningHandler)).Queries("versioning", "")
+		// GetBucketAccelerateHandler - this is a dummy call.
+		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketAccelerateHandler)).Queries("accelerate", "")
+		// GetBucketRequestPaymentHandler - this is a dummy call.
+		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketRequestPaymentHandler)).Queries("requestPayment", "")
+		// GetBucketLoggingHandler - this is a dummy call.
+		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketLoggingHandler)).Queries("logging", "")
+		// GetBucketLifecycleHandler - this is a dummy call.
+		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketLifecycleHandler)).Queries("lifecycle", "")
+		// GetBucketReplicationHandler - this is a dummy call.
+		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketReplicationHandler)).Queries("replication", "")
+		// GetBucketTaggingHandler - this is a dummy call.
+		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketTaggingHandler)).Queries("tagging", "")
+		//DeleteBucketWebsiteHandler
+		bucket.Methods("DELETE").HandlerFunc(httpTraceAll(api.DeleteBucketWebsiteHandler)).Queries("website", "")
+		// DeleteBucketTaggingHandler
+		bucket.Methods("DELETE").HandlerFunc(httpTraceAll(api.DeleteBucketTaggingHandler)).Queries("tagging", "")
 
 		// GetBucketNotification
 		bucket.Methods("GET").HandlerFunc(httpTraceAll(api.GetBucketNotificationHandler)).Queries("notification", "")

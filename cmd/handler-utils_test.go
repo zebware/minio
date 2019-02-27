@@ -19,7 +19,6 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"encoding/xml"
 	"io/ioutil"
 	"net/http"
@@ -40,65 +39,50 @@ func TestIsValidLocationContraint(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Test with corrupted XML
+	// Corrupted XML
 	malformedReq := &http.Request{
 		Body:          ioutil.NopCloser(bytes.NewBuffer([]byte("<>"))),
 		ContentLength: int64(len("<>")),
 	}
-	if _, err := parseLocationConstraint(malformedReq); err != ErrMalformedXML {
-		t.Fatal("Unexpected error: ", err)
+
+	// Not an XML
+	badRequest := &http.Request{
+		Body:          ioutil.NopCloser(bytes.NewReader([]byte("garbage"))),
+		ContentLength: int64(len("garbage")),
 	}
 
 	// generates the input request with XML bucket configuration set to the request body.
-	createExpectedRequest := func(req *http.Request, bucketConfig interface{}) (*http.Request, error) {
-		var createBucketConfigBytes []byte
-		createBucketConfigBytes, e := xml.Marshal(bucketConfig)
-		if e != nil {
-			return nil, e
-		}
+	createExpectedRequest := func(req *http.Request, location string) *http.Request {
+		createBucketConfig := createBucketLocationConfiguration{}
+		createBucketConfig.Location = location
+		createBucketConfigBytes, _ := xml.Marshal(createBucketConfig)
 		createBucketConfigBuffer := bytes.NewBuffer(createBucketConfigBytes)
 		req.Body = ioutil.NopCloser(createBucketConfigBuffer)
 		req.ContentLength = int64(createBucketConfigBuffer.Len())
-		return req, nil
+		return req
 	}
 
 	testCases := []struct {
-		bucketConfig       interface{}
+		request            *http.Request
 		serverConfigRegion string
 		expectedCode       APIErrorCode
 	}{
 		// Test case - 1.
-		{createBucketLocationConfiguration{Location: globalMinioDefaultRegion}, globalMinioDefaultRegion, ErrNone},
+		{createExpectedRequest(&http.Request{}, "eu-central-1"), globalMinioDefaultRegion, ErrNone},
 		// Test case - 2.
 		// In case of empty request body ErrNone is returned.
-		{createBucketLocationConfiguration{Location: ""}, globalMinioDefaultRegion, ErrNone},
-		// Test case - 3.
-		// In case of a request body that is another valid object ErrMalformedXML is returned.
-		{ObjectIdentifier{}, globalMinioDefaultRegion, ErrMalformedXML},
-		// Test case - 3.
-		// In case of a request body that is another valid object ErrNone is returned.
-		{"{\"test\" = \"text\"}", globalMinioDefaultRegion, ErrMalformedXML},
+		{createExpectedRequest(&http.Request{}, ""), globalMinioDefaultRegion, ErrNone},
+		// Test case - 3
+		// In case of garbage request body ErrMalformedXML is returned.
+		{badRequest, globalMinioDefaultRegion, ErrMalformedXML},
+		// Test case - 4
+		// In case of invalid XML request body ErrMalformedXML is returned.
+		{malformedReq, globalMinioDefaultRegion, ErrMalformedXML},
 	}
+
 	for i, testCase := range testCases {
-		var (
-			e            error
-			inputRequest *http.Request
-			reqBytes     []byte
-		)
-		if reflect.TypeOf(testCase.bucketConfig).Kind() == reflect.String {
-			inputRequest = &http.Request{}
-			reqBytes, e = json.Marshal(testCase.bucketConfig)
-			reader := bytes.NewReader(reqBytes)
-			inputRequest.Body = ioutil.NopCloser(reader)
-			inputRequest.ContentLength = int64(len(reqBytes))
-		} else {
-			inputRequest, e = createExpectedRequest(&http.Request{}, testCase.bucketConfig)
-		}
-		if e != nil {
-			t.Fatalf("Test %d: Failed to Marshal bucket configuration", i+1)
-		}
 		globalServerConfig.SetRegion(testCase.serverConfigRegion)
-		_, actualCode := parseLocationConstraint(inputRequest)
+		_, actualCode := parseLocationConstraint(testCase.request)
 		if testCase.expectedCode != actualCode {
 			t.Errorf("Test %d: Expected the APIErrCode to be %d, but instead found %d", i+1, testCase.expectedCode, actualCode)
 		}
@@ -229,15 +213,15 @@ func TestGetResource(t *testing.T) {
 	testCases := []struct {
 		p                string
 		host             string
-		domain           string
+		domains          []string
 		expectedResource string
 	}{
-		{"/a/b/c", "test.mydomain.com", "mydomain.com", "/test/a/b/c"},
-		{"/a/b/c", "test.mydomain.com", "notmydomain.com", "/a/b/c"},
-		{"/a/b/c", "test.mydomain.com", "", "/a/b/c"},
+		{"/a/b/c", "test.mydomain.com", []string{"mydomain.com"}, "/test/a/b/c"},
+		{"/a/b/c", "test.mydomain.com", []string{"notmydomain.com"}, "/a/b/c"},
+		{"/a/b/c", "test.mydomain.com", nil, "/a/b/c"},
 	}
 	for i, test := range testCases {
-		gotResource, err := getResource(test.p, test.host, test.domain)
+		gotResource, err := getResource(test.p, test.host, test.domains)
 		if err != nil {
 			t.Fatal(err)
 		}

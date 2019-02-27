@@ -119,9 +119,10 @@ Refer to the link https://github.com/minio/minio/tree/master/docs/erasure/storag
 	uiErrInvalidAddressFlag = newUIErrFn(
 		"--address input is invalid",
 		"Please check --address parameter",
-		`--address binds to a specific ADDRESS:PORT, ADDRESS can be an  IP or hostname (default port is ':9000')
-    Examples: --address ':443'
-              --address '172.16.34.31:9000'`,
+		`--address binds to a specific ADDRESS:PORT, ADDRESS can be an IPv4/IPv6 address or hostname (default port is ':9000')
+	Examples: --address ':443'
+		  --address '172.16.34.31:9000'
+		  --address '[fe80::da00:a6c8:e3ae:ddd7]:9000'`,
 	)
 
 	uiErrInvalidFSEndpoint = newUIErrFn(
@@ -202,5 +203,17 @@ Example 1:
 		"Invalid compression include value",
 		"Please check the passed value",
 		"Compress extensions/mime-types are delimited by `,`. For eg, MINIO_COMPRESS_ATTR=\"A,B,C\"",
+	)
+
+	uiErrInvalidGWSSEValue = newUIErrFn(
+		"Invalid gateway SSE value",
+		"Please check the passed value",
+		"MINIO_GATEWAY_SSE: Gateway SSE accepts only C and S3 as valid values. Delimit by `;` to set more than one value",
+	)
+
+	uiErrInvalidGWSSEEnvValue = newUIErrFn(
+		"Invalid gateway SSE configuration",
+		"",
+		"Refer to https://docs.minio.io/docs/minio-kms-quickstart-guide.html for setting up SSE",
 	)
 )

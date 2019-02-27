@@ -17,6 +17,8 @@
 package nas
 
 import (
+	"context"
+
 	"github.com/minio/cli"
 	minio "github.com/minio/minio/cmd"
 	"github.com/minio/minio/pkg/auth"
@@ -74,7 +76,7 @@ EXAMPLES:
 
 	minio.RegisterGatewayCommand(cli.Command{
 		Name:               nasBackend,
-		Usage:              "Network-attached storage (NAS).",
+		Usage:              "Network-attached storage (NAS)",
 		Action:             nasGatewayMain,
 		CustomHelpTemplate: nasGatewayTemplate,
 		HideHelpCommand:    true,
@@ -108,7 +110,7 @@ func (g *NAS) NewGatewayLayer(creds auth.Credentials) (minio.ObjectLayer, error)
 	if err != nil {
 		return nil, err
 	}
-	return &nasObjects{newObject.(*minio.FSObjects)}, nil
+	return &nasObjects{newObject}, nil
 }
 
 // Production - nas gateway is production ready.
@@ -116,17 +118,18 @@ func (g *NAS) Production() bool {
 	return true
 }
 
+// IsListenBucketSupported returns whether listen bucket notification is applicable for this gateway.
+func (n *nasObjects) IsListenBucketSupported() bool {
+	return false
+}
+
+func (n *nasObjects) StorageInfo(ctx context.Context) minio.StorageInfo {
+	sinfo := n.ObjectLayer.StorageInfo(ctx)
+	sinfo.Backend.Type = minio.Unknown
+	return sinfo
+}
+
 // nasObjects implements gateway for Minio and S3 compatible object storage servers.
 type nasObjects struct {
-	*minio.FSObjects
-}
-
-// IsNotificationSupported returns whether notifications are applicable for this layer.
-func (l *nasObjects) IsNotificationSupported() bool {
-	return false
-}
-
-// IsCompressionSupported returns whether compression is applicable for this layer.
-func (l *nasObjects) IsCompressionSupported() bool {
-	return false
+	minio.ObjectLayer
 }

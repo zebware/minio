@@ -29,7 +29,6 @@ import (
 
 	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/bpool"
-	"github.com/minio/minio/pkg/hash"
 	"github.com/minio/minio/pkg/madmin"
 	"github.com/minio/minio/pkg/policy"
 	"github.com/minio/minio/pkg/sync/errgroup"
@@ -235,7 +234,7 @@ func (s *xlSets) monitorAndConnectEndpoints(monitorInterval time.Duration) {
 
 	for {
 		select {
-		case <-globalServiceDoneCh:
+		case <-GlobalServiceDoneCh:
 			return
 		case <-s.disksConnectDoneCh:
 			return
@@ -289,7 +288,7 @@ func newXLSets(endpoints EndpointList, format *formatXLV3, setCount int, drivesP
 			nsMutex:  mutex,
 			bp:       bp,
 		}
-		go s.sets[i].cleanupStaleMultipartUploads(context.Background(), globalMultipartCleanupInterval, globalMultipartExpiry, globalServiceDoneCh)
+		go s.sets[i].cleanupStaleMultipartUploads(context.Background(), GlobalMultipartCleanupInterval, GlobalMultipartExpiry, GlobalServiceDoneCh)
 	}
 
 	// Connect disks right away, but wait until we have `format.json` quorum.
@@ -517,7 +516,12 @@ func (s *xlSets) IsNotificationSupported() bool {
 	return s.getHashedSet("").IsNotificationSupported()
 }
 
-// IsEncryptionSupported returns whether server side encryption is applicable for this layer.
+// IsListenBucketSupported returns whether listen bucket notification is applicable for this layer.
+func (s *xlSets) IsListenBucketSupported() bool {
+	return true
+}
+
+// IsEncryptionSupported returns whether server side encryption is implemented for this layer.
 func (s *xlSets) IsEncryptionSupported() bool {
 	return s.getHashedSet("").IsEncryptionSupported()
 }
@@ -598,8 +602,8 @@ func (s *xlSets) GetObject(ctx context.Context, bucket, object string, startOffs
 }
 
 // PutObject - writes an object to hashedSet based on the object name.
-func (s *xlSets) PutObject(ctx context.Context, bucket string, object string, data *hash.Reader, metadata map[string]string, opts ObjectOptions) (objInfo ObjectInfo, err error) {
-	return s.getHashedSet(object).PutObject(ctx, bucket, object, data, metadata, opts)
+func (s *xlSets) PutObject(ctx context.Context, bucket string, object string, data *PutObjReader, opts ObjectOptions) (objInfo ObjectInfo, err error) {
+	return s.getHashedSet(object).PutObject(ctx, bucket, object, data, opts)
 }
 
 // GetObjectInfo - reads object metadata from the hashedSet based on the object name.
@@ -630,8 +634,8 @@ func (s *xlSets) CopyObject(ctx context.Context, srcBucket, srcObject, destBucke
 		}
 		defer objectDWLock.Unlock()
 	}
-
-	return destSet.putObject(ctx, destBucket, destObject, srcInfo.Reader, srcInfo.UserDefined, dstOpts)
+	putOpts := ObjectOptions{ServerSideEncryption: dstOpts.ServerSideEncryption, UserDefined: srcInfo.UserDefined}
+	return destSet.putObject(ctx, destBucket, destObject, srcInfo.PutObjReader, putOpts)
 }
 
 // Returns function "listDir" of the type listDirFunc.
@@ -819,8 +823,8 @@ func (s *xlSets) ListMultipartUploads(ctx context.Context, bucket, prefix, keyMa
 }
 
 // Initiate a new multipart upload on a hashedSet based on object name.
-func (s *xlSets) NewMultipartUpload(ctx context.Context, bucket, object string, metadata map[string]string, opts ObjectOptions) (uploadID string, err error) {
-	return s.getHashedSet(object).NewMultipartUpload(ctx, bucket, object, metadata, opts)
+func (s *xlSets) NewMultipartUpload(ctx context.Context, bucket, object string, opts ObjectOptions) (uploadID string, err error) {
+	return s.getHashedSet(object).NewMultipartUpload(ctx, bucket, object, opts)
 }
 
 // Copies a part of an object from source hashedSet to destination hashedSet.
@@ -828,17 +832,17 @@ func (s *xlSets) CopyObjectPart(ctx context.Context, srcBucket, srcObject, destB
 	startOffset int64, length int64, srcInfo ObjectInfo, srcOpts, dstOpts ObjectOptions) (partInfo PartInfo, err error) {
 	destSet := s.getHashedSet(destObject)
 
-	return destSet.PutObjectPart(ctx, destBucket, destObject, uploadID, partID, srcInfo.Reader, dstOpts)
+	return destSet.PutObjectPart(ctx, destBucket, destObject, uploadID, partID, NewPutObjReader(srcInfo.Reader, nil, nil), dstOpts)
 }
 
 // PutObjectPart - writes part of an object to hashedSet based on the object name.
-func (s *xlSets) PutObjectPart(ctx context.Context, bucket, object, uploadID string, partID int, data *hash.Reader, opts ObjectOptions) (info PartInfo, err error) {
+func (s *xlSets) PutObjectPart(ctx context.Context, bucket, object, uploadID string, partID int, data *PutObjReader, opts ObjectOptions) (info PartInfo, err error) {
 	return s.getHashedSet(object).PutObjectPart(ctx, bucket, object, uploadID, partID, data, opts)
 }
 
 // ListObjectParts - lists all uploaded parts to an object in hashedSet.
-func (s *xlSets) ListObjectParts(ctx context.Context, bucket, object, uploadID string, partNumberMarker int, maxParts int) (result ListPartsInfo, err error) {
-	return s.getHashedSet(object).ListObjectParts(ctx, bucket, object, uploadID, partNumberMarker, maxParts)
+func (s *xlSets) ListObjectParts(ctx context.Context, bucket, object, uploadID string, partNumberMarker int, maxParts int, opts ObjectOptions) (result ListPartsInfo, err error) {
+	return s.getHashedSet(object).ListObjectParts(ctx, bucket, object, uploadID, partNumberMarker, maxParts, opts)
 }
 
 // Aborts an in-progress multipart operation on hashedSet based on the object name.
@@ -847,8 +851,8 @@ func (s *xlSets) AbortMultipartUpload(ctx context.Context, bucket, object, uploa
 }
 
 // CompleteMultipartUpload - completes a pending multipart transaction, on hashedSet based on object name.
-func (s *xlSets) CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, uploadedParts []CompletePart) (objInfo ObjectInfo, err error) {
-	return s.getHashedSet(object).CompleteMultipartUpload(ctx, bucket, object, uploadID, uploadedParts)
+func (s *xlSets) CompleteMultipartUpload(ctx context.Context, bucket, object, uploadID string, uploadedParts []CompletePart, opts ObjectOptions) (objInfo ObjectInfo, err error) {
+	return s.getHashedSet(object).CompleteMultipartUpload(ctx, bucket, object, uploadID, uploadedParts, opts)
 }
 
 /*
@@ -1004,6 +1008,65 @@ func (s *xlSets) ReloadFormat(ctx context.Context, dryRun bool) (err error) {
 	return nil
 }
 
+// If it is a single node XL and all disks are root disks, it is most likely a test setup, else it is a production setup.
+// On a test setup we allow creation of format.json on root disks to help with dev/testing.
+func isTestSetup(infos []DiskInfo, errs []error) bool {
+	if globalIsDistXL {
+		return false
+	}
+	rootDiskCount := 0
+	for i := range errs {
+		if errs[i] != nil {
+			// On error it is safer to assume that this is not a test setup.
+			return false
+		}
+		if infos[i].RootDisk {
+			rootDiskCount++
+		}
+	}
+	// It is a test setup if all disks are root disks.
+	return rootDiskCount == len(infos)
+}
+
+func getAllDiskInfos(storageDisks []StorageAPI) ([]DiskInfo, []error) {
+	infos := make([]DiskInfo, len(storageDisks))
+	errs := make([]error, len(storageDisks))
+	var wg sync.WaitGroup
+	for i := range storageDisks {
+		if storageDisks[i] == nil {
+			errs[i] = errDiskNotFound
+			continue
+		}
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			infos[i], errs[i] = storageDisks[i].DiskInfo()
+		}(i)
+	}
+	wg.Wait()
+	return infos, errs
+}
+
+// Mark root disks as down so as not to heal them.
+func markRootDisksAsDown(storageDisks []StorageAPI) {
+	infos, errs := getAllDiskInfos(storageDisks)
+	if isTestSetup(infos, errs) {
+		// Allow healing of disks for test setups to help with testing.
+		return
+	}
+	for i := range storageDisks {
+		if errs[i] != nil {
+			storageDisks[i] = nil
+			continue
+		}
+		if infos[i].RootDisk {
+			// We should not heal on root disk. i.e in a situation where the minio-administrator has unmounted a
+			// defective drive we should not heal a path on the root disk.
+			storageDisks[i] = nil
+		}
+	}
+}
+
 // HealFormat - heals missing `format.json` on fresh unformatted disks.
 // TODO: In future support corrupted disks missing format.json but has erasure
 // coded data in it.
@@ -1026,6 +1089,8 @@ func (s *xlSets) HealFormat(ctx context.Context, dryRun bool) (res madmin.HealRe
 		}
 	}(storageDisks)
 
+	markRootDisksAsDown(storageDisks)
+
 	formats, sErrs := loadFormatXLAll(storageDisks)
 	if err = checkFormatXLValues(formats); err != nil {
 		return madmin.HealResultItem{}, err
@@ -1046,16 +1111,8 @@ func (s *xlSets) HealFormat(ctx context.Context, dryRun bool) (res madmin.HealRe
 	res.Before.Drives = make([]madmin.HealDriveInfo, len(beforeDrives))
 	// Copy "after" drive state too from before.
 	for k, v := range beforeDrives {
-		res.Before.Drives[k] = madmin.HealDriveInfo{
-			UUID:     v.UUID,
-			Endpoint: v.Endpoint,
-			State:    v.State,
-		}
-		res.After.Drives[k] = madmin.HealDriveInfo{
-			UUID:     v.UUID,
-			Endpoint: v.Endpoint,
-			State:    v.State,
-		}
+		res.Before.Drives[k] = madmin.HealDriveInfo(v)
+		res.After.Drives[k] = madmin.HealDriveInfo(v)
 	}
 
 	for index, sErr := range sErrs {
@@ -1167,15 +1224,15 @@ func (s *xlSets) HealFormat(ctx context.Context, dryRun bool) (res madmin.HealRe
 }
 
 // HealBucket - heals inconsistent buckets and bucket metadata on all sets.
-func (s *xlSets) HealBucket(ctx context.Context, bucket string, dryRun bool) (results []madmin.HealResultItem, err error) {
+func (s *xlSets) HealBucket(ctx context.Context, bucket string, dryRun, remove bool) (result madmin.HealResultItem, err error) {
 	bucketLock := globalNSMutex.NewNSLock(bucket, "")
 	if err := bucketLock.GetLock(globalHealingTimeout); err != nil {
-		return nil, err
+		return result, err
 	}
 	defer bucketLock.Unlock()
 
 	// Initialize heal result info
-	res := madmin.HealResultItem{
+	result = madmin.HealResultItem{
 		Type:      madmin.HealItemBucket,
 		Bucket:    bucket,
 		DiskCount: s.setCount * s.drivesPerSet,
@@ -1183,25 +1240,18 @@ func (s *xlSets) HealBucket(ctx context.Context, bucket string, dryRun bool) (re
 	}
 
 	for _, s := range s.sets {
-		var setResults []madmin.HealResultItem
-		setResults, _ = s.HealBucket(ctx, bucket, dryRun)
-		for _, setResult := range setResults {
-			if setResult.Type == madmin.HealItemBucket {
-				for _, v := range setResult.Before.Drives {
-					res.Before.Drives = append(res.Before.Drives, v)
-				}
-				for _, v := range setResult.After.Drives {
-					res.After.Drives = append(res.After.Drives, v)
-				}
-				continue
-			}
-			results = append(results, setResult)
+		var healResult madmin.HealResultItem
+		healResult, err = s.HealBucket(ctx, bucket, dryRun, remove)
+		if err != nil {
+			return result, err
 		}
+		result.Before.Drives = append(result.Before.Drives, healResult.Before.Drives...)
+		result.After.Drives = append(result.After.Drives, healResult.After.Drives...)
 	}
 
 	for _, endpoint := range s.endpoints {
 		var foundBefore bool
-		for _, v := range res.Before.Drives {
+		for _, v := range result.Before.Drives {
 			if endpoint.IsLocal {
 				if v.Endpoint == endpoint.Path {
 					foundBefore = true
@@ -1213,14 +1263,14 @@ func (s *xlSets) HealBucket(ctx context.Context, bucket string, dryRun bool) (re
 			}
 		}
 		if !foundBefore {
-			res.Before.Drives = append(res.Before.Drives, madmin.HealDriveInfo{
+			result.Before.Drives = append(result.Before.Drives, madmin.HealDriveInfo{
 				UUID:     "",
 				Endpoint: endpoint.String(),
 				State:    madmin.DriveStateOffline,
 			})
 		}
 		var foundAfter bool
-		for _, v := range res.After.Drives {
+		for _, v := range result.After.Drives {
 			if endpoint.IsLocal {
 				if v.Endpoint == endpoint.Path {
 					foundAfter = true
@@ -1232,7 +1282,7 @@ func (s *xlSets) HealBucket(ctx context.Context, bucket string, dryRun bool) (re
 			}
 		}
 		if !foundAfter {
-			res.After.Drives = append(res.After.Drives, madmin.HealDriveInfo{
+			result.After.Drives = append(result.After.Drives, madmin.HealDriveInfo{
 				UUID:     "",
 				Endpoint: endpoint.String(),
 				State:    madmin.DriveStateOffline,
@@ -1241,19 +1291,17 @@ func (s *xlSets) HealBucket(ctx context.Context, bucket string, dryRun bool) (re
 	}
 
 	// Check if we had quorum to write, if not return an appropriate error.
-	_, afterDriveOnline := res.GetOnlineCounts()
+	_, afterDriveOnline := result.GetOnlineCounts()
 	if afterDriveOnline < ((s.setCount*s.drivesPerSet)/2)+1 {
-		return nil, toObjectErr(errXLWriteQuorum, bucket)
+		return result, toObjectErr(errXLWriteQuorum, bucket)
 	}
 
-	results = append(results, res)
-
-	return results, nil
+	return result, nil
 }
 
 // HealObject - heals inconsistent object on a hashedSet based on object name.
-func (s *xlSets) HealObject(ctx context.Context, bucket, object string, dryRun bool) (madmin.HealResultItem, error) {
-	return s.getHashedSet(object).HealObject(ctx, bucket, object, dryRun)
+func (s *xlSets) HealObject(ctx context.Context, bucket, object string, dryRun, remove bool) (madmin.HealResultItem, error) {
+	return s.getHashedSet(object).HealObject(ctx, bucket, object, dryRun, remove)
 }
 
 // Lists all buckets which need healing.
@@ -1266,92 +1314,13 @@ func (s *xlSets) ListBucketsHeal(ctx context.Context) ([]BucketInfo, error) {
 			return nil, err
 		}
 		for _, currBucket := range buckets {
-			healBuckets[currBucket.Name] = BucketInfo{
-				Name:    currBucket.Name,
-				Created: currBucket.Created,
-			}
+			healBuckets[currBucket.Name] = BucketInfo(currBucket)
 		}
 	}
 	for _, bucketInfo := range healBuckets {
 		listBuckets = append(listBuckets, bucketInfo)
 	}
 	return listBuckets, nil
-}
-
-// Returns function "listDir" of the type listDirFunc.
-// isLeaf - is used by listDir function to check if an entry is a leaf or non-leaf entry.
-// disks - used for doing disk.ListDir(). Sets passes set of disks.
-func listDirSetsHealFactory(isLeaf isLeafFunc, sets ...[]StorageAPI) listDirFunc {
-	listDirInternal := func(bucket, prefixDir, prefixEntry string, disks []StorageAPI) (mergedEntries []string) {
-		for _, disk := range disks {
-			if disk == nil {
-				continue
-			}
-
-			var entries []string
-			var newEntries []string
-			var err error
-			entries, err = disk.ListDir(bucket, prefixDir, -1)
-			if err != nil {
-				continue
-			}
-
-			// Filter entries that have the prefix prefixEntry.
-			entries = filterMatchingPrefix(entries, prefixEntry)
-
-			// isLeaf() check has to happen here so that
-			// trailing "/" for objects can be removed.
-			for i, entry := range entries {
-				if isLeaf(bucket, pathJoin(prefixDir, entry)) {
-					entries[i] = strings.TrimSuffix(entry, slashSeparator)
-				}
-			}
-
-			// Find elements in entries which are not in mergedEntries
-			for _, entry := range entries {
-				idx := sort.SearchStrings(mergedEntries, entry)
-				// if entry is already present in mergedEntries don't add.
-				if idx < len(mergedEntries) && mergedEntries[idx] == entry {
-					continue
-				}
-				newEntries = append(newEntries, entry)
-			}
-
-			if len(newEntries) > 0 {
-				// Merge the entries and sort it.
-				mergedEntries = append(mergedEntries, newEntries...)
-				sort.Strings(mergedEntries)
-			}
-		}
-		return mergedEntries
-
-	}
-
-	// listDir - lists all the entries at a given prefix and given entry in the prefix.
-	listDir := func(bucket, prefixDir, prefixEntry string) (mergedEntries []string, delayIsLeaf bool) {
-		for _, disks := range sets {
-			entries := listDirInternal(bucket, prefixDir, prefixEntry, disks)
-
-			var newEntries []string
-			// Find elements in entries which are not in mergedEntries
-			for _, entry := range entries {
-				idx := sort.SearchStrings(mergedEntries, entry)
-				// if entry is already present in mergedEntries don't add.
-				if idx < len(mergedEntries) && mergedEntries[idx] == entry {
-					continue
-				}
-				newEntries = append(newEntries, entry)
-			}
-
-			if len(newEntries) > 0 {
-				// Merge the entries and sort it.
-				mergedEntries = append(mergedEntries, newEntries...)
-				sort.Strings(mergedEntries)
-			}
-		}
-		return mergedEntries, false
-	}
-	return listDir
 }
 
 // listObjectsHeal - wrapper function implemented over file tree walk.
@@ -1389,8 +1358,8 @@ func (s *xlSets) listObjectsHeal(ctx context.Context, bucket, prefix, marker, de
 			setDisks = append(setDisks, set.getLoadBalancedDisks())
 		}
 
-		listDir := listDirSetsHealFactory(isLeaf, setDisks...)
-		walkResultCh = startTreeWalk(ctx, bucket, prefix, marker, recursive, listDir, nil, isLeafDir, endWalkCh)
+		listDir := listDirSetsFactory(ctx, isLeaf, isLeafDir, setDisks...)
+		walkResultCh = startTreeWalk(ctx, bucket, prefix, marker, recursive, listDir, isLeaf, isLeafDir, endWalkCh)
 	}
 
 	var objInfos []ObjectInfo

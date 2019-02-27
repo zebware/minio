@@ -17,6 +17,7 @@ Bucket events can be published to the following targets:
 | [`AMQP`](#AMQP) | [`Redis`](#Redis) | [`MySQL`](#MySQL) |
 | [`MQTT`](#MQTT) | [`NATS`](#NATS) | [`Apache Kafka`](#apache-kafka) |
 | [`Elasticsearch`](#Elasticsearch) | [`PostgreSQL`](#PostgreSQL) | [`Webhooks`](#webhooks) |
+| [`NSQ`](#NSQ) | | |
 
 ## Prerequisites
 
@@ -86,8 +87,8 @@ We will enable bucket event notification to trigger whenever a JPEG image is upl
 
 ```
 mc mb myminio/images
-mc events add  myminio/images arn:minio:sqs::1:amqp --suffix .jpg
-mc events list myminio/images
+mc event add  myminio/images arn:minio:sqs::1:amqp --suffix .jpg
+mc event list myminio/images
 arn:minio:sqs::1:amqp s3:ObjectCreated:*,s3:ObjectRemoved:* Filter: suffix=”.jpg”
 ```
 
@@ -159,9 +160,10 @@ The Minio server configuration file is stored on the backend in json format. The
 | `broker` | _string_ | (Required) MQTT server endpoint, e.g. `tcp://localhost:1883` |
 | `topic` | _string_ | (Required) Name of the MQTT topic to publish on, e.g. `minio` |
 | `qos` | _int_ | Set the Quality of Service Level |
-| `clientId` | _string_ | Unique ID for the MQTT broker to identify Minio |
 | `username` | _string_ | Username to connect to the MQTT server (if required) |
 | `password` | _string_ | Password to connect to the MQTT server (if required) |
+| `queueDir` | _string_ | Persistent store for events when MQTT broker is offline |
+| `queueLimit` | _int_ | Set the maximum event limit for the persistent store. The default limit is 10000 |
 
 An example configuration for MQTT is shown below:
 
@@ -172,12 +174,15 @@ An example configuration for MQTT is shown below:
         "broker": "tcp://localhost:1883",
         "topic": "minio",
         "qos": 1,
-        "clientId": "minio",
         "username": "",
-        "password": ""
+        "password": "",
+        "queueDir": "",
+        "queueLimit": 0
     }
 }
 ```
+Minio supports persistent event store. The persistent store will backup events when the MQTT broker goes offline and replays it when the broker comes back online. The event store can be configured by setting the directory path in `queueDir` field and the maximum limit of events in the queueDir in `queueLimit` field. For eg, the `queueDir` can be `/home/events` and `queueLimit` can be `1000`. By default, the `queueLimit` is set to 10000.
+
 To update the configuration, use `mc admin config get` command to get the current configuration file for the minio deployment in json format, and save it locally.
 ```sh
 $ mc admin config get myminio/ > /tmp/myconfig
@@ -198,8 +203,8 @@ We will enable bucket event notification to trigger whenever a JPEG image is upl
 
 ```
 mc mb myminio/images
-mc events add  myminio/images arn:minio:sqs::1:mqtt --suffix .jpg
-mc events list myminio/images
+mc event add  myminio/images arn:minio:sqs::1:mqtt --suffix .jpg
+mc event list myminio/images
 arn:minio:sqs::1:amqp s3:ObjectCreated:*,s3:ObjectRemoved:* Filter: suffix=”.jpg”
 ```
 
@@ -216,12 +221,14 @@ import paho.mqtt.client as mqtt
 
 def on_connect(client, userdata, flags, rc):
   print("Connected with result code "+str(rc))
-  client.subscribe("minio")
+  # qos level is set to 1
+  client.subscribe("minio", 1)
 
 def on_message(client, userdata, msg):
     print(msg.payload)
 
-client = mqtt.Client()
+# client_id is a randomly generated unique ID for the mqtt broker to identify the connection.
+client = mqtt.Client(client_id="myclientid",clean_session=False)
 
 client.on_connect = on_connect
 client.on_message = on_message
@@ -313,8 +320,8 @@ With the `mc` tool, the configuration is very simple to add. Let us say that the
 
 ```
 mc mb myminio/images
-mc events add  myminio/images arn:minio:sqs::1:elasticsearch --suffix .jpg
-mc events list myminio/images
+mc event add  myminio/images arn:minio:sqs::1:elasticsearch --suffix .jpg
+mc event list myminio/images
 arn:minio:sqs::1:elasticsearch s3:ObjectCreated:*,s3:ObjectRemoved:* Filter: suffix=”.jpg”
 ```
 
@@ -459,8 +466,8 @@ With the `mc` tool, the configuration is very simple to add. Let us say that the
 
 ```
 mc mb myminio/images
-mc events add  myminio/images arn:minio:sqs::1:redis --suffix .jpg
-mc events list myminio/images
+mc event add  myminio/images arn:minio:sqs::1:redis --suffix .jpg
+mc event list myminio/images
 arn:minio:sqs::1:redis s3:ObjectCreated:*,s3:ObjectRemoved:* Filter: suffix=”.jpg”
 ```
 
@@ -543,7 +550,7 @@ Minio server also supports [NATS Streaming mode](http://nats.io/documentation/st
         "password": "yoursecret",
         "token": "",
         "secure": false,
-        "pingInterval": 0
+        "pingInterval": 0,
         "streaming": {
             "enable": true,
             "clusterID": "test-cluster",
@@ -562,8 +569,8 @@ We will enable bucket event notification to trigger whenever a JPEG image is upl
 
 ```
 mc mb myminio/images
-mc events add  myminio/images arn:minio:sqs::1:nats --suffix .jpg
-mc events list myminio/images
+mc event add  myminio/images arn:minio:sqs::1:nats --suffix .jpg
+mc event list myminio/images
 arn:minio:sqs::1:nats s3:ObjectCreated:*,s3:ObjectRemoved:* Filter: suffix=”.jpg”
 ```
 
@@ -744,10 +751,10 @@ With the `mc` tool, the configuration is very simple to add. Let us say that the
 # Create bucket named `images` in myminio
 mc mb myminio/images
 # Add notification configuration on the `images` bucket using the MySQL ARN. The --suffix argument filters events.
-mc events add myminio/images arn:minio:sqs::1:postgresql --suffix .jpg
+mc event add myminio/images arn:minio:sqs::1:postgresql --suffix .jpg
 # Print out the notification configuration on the `images` bucket.
-mc events list myminio/images
-mc events list myminio/images
+mc event list myminio/images
+mc event list myminio/images
 arn:minio:sqs::1:postgresql s3:ObjectCreated:*,s3:ObjectRemoved:* Filter: suffix=”.jpg”
 ```
 
@@ -843,9 +850,9 @@ With the `mc` tool, the configuration is very simple to add. Let us say that the
 # Create bucket named `images` in myminio
 mc mb myminio/images
 # Add notification configuration on the `images` bucket using the MySQL ARN. The --suffix argument filters events.
-mc events add myminio/images arn:minio:sqs::1:postgresql --suffix .jpg
+mc event add myminio/images arn:minio:sqs::1:postgresql --suffix .jpg
 # Print out the notification configuration on the `images` bucket.
-mc events list myminio/images
+mc event list myminio/images
 arn:minio:sqs::1:postgresql s3:ObjectCreated:*,s3:ObjectRemoved:* Filter: suffix=”.jpg”
 ```
 
@@ -907,8 +914,8 @@ We will enable bucket event notification to trigger whenever a JPEG image is upl
 
 ```
 mc mb myminio/images
-mc events add  myminio/images arn:minio:sqs::1:kafka --suffix .jpg
-mc events list myminio/images
+mc event add  myminio/images arn:minio:sqs::1:kafka --suffix .jpg
+mc event list myminio/images
 arn:minio:sqs::1:kafka s3:ObjectCreated:*,s3:ObjectRemoved:* Filter: suffix=”.jpg”
 ```
 
@@ -964,13 +971,13 @@ We will enable bucket event notification to trigger whenever a JPEG image is upl
 ```
 mc mb myminio/images
 mc mb myminio/images-thumbnail
-mc events add myminio/images arn:minio:sqs::1:webhook --events put --suffix .jpg
+mc event add myminio/images arn:minio:sqs::1:webhook --event put --suffix .jpg
 ```
 
 Check if event notification is successfully configured by
 
 ```
-mc events list myminio/images
+mc event list myminio/images
 ```
 
 You should get a response like this
@@ -1005,6 +1012,78 @@ Wait a few moments, then check the bucket’s contents with mc ls — you wi
 ```
 mc ls myminio/images-thumbnail
 [2017-02-08 11:39:40 IST]   992B images-thumbnail.jpg
+```
+
+<a name="NSQ"></a>
+## Publish Minio events to NSQ
+
+Install an NSQ Daemon from [here](https://nsq.io/). Or use the following Docker
+command for starting an nsq daemon:
+
+```
+docker run --rm -p 4150-4151:4150-4151 nsqio/nsq /nsqd
+```
+
+### Step 1: Add NSQ endpoint to Minio
+
+The Minio server configuration file is stored on the backend in json format. The NSQ configuration is located in the `nsq` key under the `notify` top-level key. Create a configuration key-value pair here for your NSQ instance. The key is a name for your NSQ endpoint, and the value is a collection of key-value parameters.
+
+An example configuration for NSQ is shown below:
+
+```json
+"nsq": {
+    "1": {
+        "enable": true,
+        "nsqdAddress": "127.0.0.1:4150",
+        "topic": "minio",
+        "tls": {
+            "enable": false,
+            "skipVerify": true
+        }
+    }
+}
+```
+To update the configuration, use `mc admin config get` command to get the current configuration file for the minio deployment in json format, and save it locally.
+```sh
+$ mc admin config get myminio/ > /tmp/myconfig
+```
+After updating the NSQ configuration in /tmp/myconfig , use `mc admin config set` command to update the configuration for the deployment.Restart the Minio server to put the changes into effect. The server will print a line like `SQS ARNs: arn:minio:sqs::1:nsq` at start-up if there were no errors.
+```sh
+$ mc admin config set myminio < /tmp/myconfig
+```
+
+Note that, you can add as many NSQ daemon endpoint configurations as needed by providing an identifier (like "1" in the example above) for the NSQ instance and an object of per-server configuration parameters.
+
+
+### Step 2: Enable bucket notification using Minio client
+
+We will enable bucket event notification to trigger whenever a JPEG image is uploaded or deleted ``images`` bucket on ``myminio`` server. Here ARN value is ``arn:minio:sqs::1:nsq``.
+
+```
+mc mb myminio/images
+mc event add  myminio/images arn:minio:sqs::1:nsq --suffix .jpg
+mc event list myminio/images
+arn:minio:sqs::1:nsq s3:ObjectCreated:*,s3:ObjectRemoved:* Filter: suffix=”.jpg”
+```
+
+### Step 3: Test on NSQ
+
+The simplest test is to download `nsq_tail` from [nsq github](https://github.com/nsqio/nsq/releases)
+
+```
+./nsq_tail -nsqd-tcp-address 127.0.0.1:4150 -topic minio
+```
+
+Open another terminal and upload a JPEG image into ``images`` bucket.
+
+```
+mc cp gopher.jpg myminio/images
+```
+
+You should receive the following event notification via NSQ once the upload completes.
+
+```
+{"EventName":"s3:ObjectCreated:Put","Key":"images/gopher.jpg","Records":[{"eventVersion":"2.0","eventSource":"minio:s3","awsRegion":"","eventTime":"2018-10-31T09:31:11Z","eventName":"s3:ObjectCreated:Put","userIdentity":{"principalId":"21EJ9HYV110O8NVX2VMS"},"requestParameters":{"sourceIPAddress":"10.1.1.1"},"responseElements":{"x-amz-request-id":"1562A792DAA53426","x-minio-origin-endpoint":"http://10.0.3.1:9000"},"s3":{"s3SchemaVersion":"1.0","configurationId":"Config","bucket":{"name":"images","ownerIdentity":{"principalId":"21EJ9HYV110O8NVX2VMS"},"arn":"arn:aws:s3:::images"},"object":{"key":"gopher.jpg","size":162023,"eTag":"5337769ffa594e742408ad3f30713cd7","contentType":"image/jpeg","userMetadata":{"content-type":"image/jpeg"},"versionId":"1","sequencer":"1562A792DAA53426"}},"source":{"host":"","port":"","userAgent":"Minio (linux; amd64) minio-go/v6.0.8 mc/DEVELOPMENT.GOGET"}}]}
 ```
 
 

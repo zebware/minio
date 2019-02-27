@@ -70,8 +70,8 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 	}
 	for _, object := range testObjects {
 		md5Bytes := md5.Sum([]byte(object.content))
-		_, err = obj.PutObject(context.Background(), testBuckets[0], object.name, mustGetHashReader(t, bytes.NewBufferString(object.content),
-			int64(len(object.content)), hex.EncodeToString(md5Bytes[:]), ""), object.meta, ObjectOptions{})
+		_, err = obj.PutObject(context.Background(), testBuckets[0], object.name, mustGetPutObjReader(t, bytes.NewBufferString(object.content),
+			int64(len(object.content)), hex.EncodeToString(md5Bytes[:]), ""), ObjectOptions{UserDefined: object.meta})
 		if err != nil {
 			t.Fatalf("%s : %s", instanceType, err.Error())
 		}
@@ -574,6 +574,14 @@ func testListObjects(obj ObjectLayer, instanceType string, t TestErrHandler) {
 				t.Errorf("Test %d: %s: Expected IsTruncated flag to be %v, but instead found it to be %v", i+1, instanceType, testCase.result.IsTruncated, result.IsTruncated)
 			}
 
+			if testCase.result.IsTruncated && result.NextMarker == "" {
+				t.Errorf("Test %d: %s: Expected NextContinuationToken to contain a string since listing is truncated, but instead found it to be empty", i+1, instanceType)
+			}
+
+			if !testCase.result.IsTruncated && result.NextMarker != "" {
+				t.Errorf("Test %d: %s: Expected NextContinuationToken to be empty since listing is not truncated, but instead found `%v`", i+1, instanceType, result.NextMarker)
+			}
+
 		}
 		// Take ListObject treeWalk go-routine to completion, if available in the treewalk pool.
 		if result.IsTruncated {
@@ -617,7 +625,7 @@ func BenchmarkListObjects(b *testing.B) {
 	// Insert objects to be listed and benchmarked later.
 	for i := 0; i < 20000; i++ {
 		key := "obj" + strconv.Itoa(i)
-		_, err = obj.PutObject(context.Background(), bucket, key, mustGetHashReader(b, bytes.NewBufferString(key), int64(len(key)), "", ""), nil, ObjectOptions{})
+		_, err = obj.PutObject(context.Background(), bucket, key, mustGetPutObjReader(b, bytes.NewBufferString(key), int64(len(key)), "", ""), ObjectOptions{})
 		if err != nil {
 			b.Fatal(err)
 		}

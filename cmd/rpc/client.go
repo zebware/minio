@@ -22,8 +22,6 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
-	"io"
-	"io/ioutil"
 	"net"
 	"net/http"
 	"reflect"
@@ -31,6 +29,7 @@ import (
 
 	xhttp "github.com/minio/minio/cmd/http"
 	xnet "github.com/minio/minio/pkg/net"
+	"golang.org/x/net/http2"
 )
 
 // DefaultRPCTimeout - default RPC timeout is one minute.
@@ -38,30 +37,9 @@ const DefaultRPCTimeout = 1 * time.Minute
 
 // Client - http based RPC client.
 type Client struct {
-	httpClient *http.Client
-	serviceURL *xnet.URL
-}
-
-// closeResponse close non nil response with any response Body.
-// convenient wrapper to drain any remaining data on response body.
-//
-// Subsequently this allows golang http RoundTripper
-// to re-use the same connection for future requests.
-func closeResponse(body io.ReadCloser) {
-	// Callers should close resp.Body when done reading from it.
-	// If resp.Body is not closed, the Client's underlying RoundTripper
-	// (typically Transport) may not be able to re-use a persistent TCP
-	// connection to the server for a subsequent "keep-alive" request.
-	if body != nil {
-		// Drain any remaining Body and then close the connection.
-		// Without this closing connection would disallow re-using
-		// the same connection for future uses.
-		//  - http://stackoverflow.com/a/17961593/4465767
-		bufp := b512pool.Get().(*[]byte)
-		defer b512pool.Put(bufp)
-		io.CopyBuffer(ioutil.Discard, body, *bufp)
-		body.Close()
-	}
+	httpClient          *http.Client
+	httpIdleConnsCloser func()
+	serviceURL          *xnet.URL
 }
 
 // Call - calls service method on RPC server.
@@ -93,7 +71,7 @@ func (client *Client) Call(serviceMethod string, args, reply interface{}) error 
 	if err != nil {
 		return err
 	}
-	defer closeResponse(response.Body)
+	defer xhttp.DrainBody(response.Body)
 
 	if response.StatusCode != http.StatusOK {
 		return fmt.Errorf("%v rpc call failed with error code %v", serviceMethod, response.StatusCode)
@@ -111,8 +89,11 @@ func (client *Client) Call(serviceMethod string, args, reply interface{}) error 
 	return gobDecode(callResponse.ReplyBytes, reply)
 }
 
-// Close - does nothing and presents for interface compatibility.
+// Close closes all idle connections of the underlying http client
 func (client *Client) Close() error {
+	if client.httpIdleConnsCloser != nil {
+		client.httpIdleConnsCloser()
+	}
 	return nil
 }
 
@@ -134,23 +115,29 @@ func newCustomDialContext(timeout time.Duration) func(ctx context.Context, netwo
 }
 
 // NewClient - returns new RPC client.
-func NewClient(serviceURL *xnet.URL, tlsConfig *tls.Config, timeout time.Duration) *Client {
-	return &Client{
-		httpClient: &http.Client{
-			// Transport is exactly same as Go default in https://golang.org/pkg/net/http/#RoundTripper
-			// except custom DialContext and TLSClientConfig.
-			Transport: &http.Transport{
-				Proxy:                 http.ProxyFromEnvironment,
-				DialContext:           newCustomDialContext(timeout),
-				MaxIdleConnsPerHost:   4096,
-				MaxIdleConns:          4096,
-				IdleConnTimeout:       90 * time.Second,
-				TLSHandshakeTimeout:   10 * time.Second,
-				ExpectContinueTimeout: 1 * time.Second,
-				TLSClientConfig:       tlsConfig,
-				DisableCompression:    true,
-			},
-		},
-		serviceURL: serviceURL,
+func NewClient(serviceURL *xnet.URL, tlsConfig *tls.Config, timeout time.Duration) (*Client, error) {
+	// Transport is exactly same as Go default in https://golang.org/pkg/net/http/#RoundTripper
+	// except custom DialContext and TLSClientConfig.
+	tr := &http.Transport{
+		Proxy:                 http.ProxyFromEnvironment,
+		DialContext:           newCustomDialContext(timeout),
+		MaxIdleConnsPerHost:   4096,
+		MaxIdleConns:          4096,
+		IdleConnTimeout:       120 * time.Second,
+		TLSHandshakeTimeout:   30 * time.Second,
+		ExpectContinueTimeout: 10 * time.Second,
+		TLSClientConfig:       tlsConfig,
+		DisableCompression:    true,
 	}
+	if tlsConfig != nil {
+		// If TLS is enabled configure http2
+		if err := http2.ConfigureTransport(tr); err != nil {
+			return nil, err
+		}
+	}
+	return &Client{
+		httpClient:          &http.Client{Transport: tr},
+		httpIdleConnsCloser: tr.CloseIdleConnections,
+		serviceURL:          serviceURL,
+	}, nil
 }

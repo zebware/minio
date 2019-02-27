@@ -92,7 +92,7 @@ EXAMPLES:
 `
 	minio.RegisterGatewayCommand(cli.Command{
 		Name:               b2Backend,
-		Usage:              "Backblaze B2.",
+		Usage:              "Backblaze B2",
 		Action:             b2GatewayMain,
 		CustomHelpTemplate: b2GatewayTemplate,
 		HideHelpCommand:    true,
@@ -534,13 +534,15 @@ func (nb *Reader) Read(p []byte) (int, error) {
 }
 
 // PutObject uploads the single upload to B2 backend by using *b2_upload_file* API, uploads upto 5GiB.
-func (l *b2Objects) PutObject(ctx context.Context, bucket string, object string, data *h2.Reader, metadata map[string]string, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
+func (l *b2Objects) PutObject(ctx context.Context, bucket string, object string, r *minio.PutObjReader, opts minio.ObjectOptions) (objInfo minio.ObjectInfo, err error) {
+	data := r.Reader
+
 	bkt, err := l.Bucket(ctx, bucket)
 	if err != nil {
 		return objInfo, err
 	}
-	contentType := metadata["content-type"]
-	delete(metadata, "content-type")
+	contentType := opts.UserDefined["content-type"]
+	delete(opts.UserDefined, "content-type")
 
 	var u *b2.URL
 	u, err = bkt.GetUploadURL(l.ctx)
@@ -551,7 +553,7 @@ func (l *b2Objects) PutObject(ctx context.Context, bucket string, object string,
 
 	hr := newB2Reader(data, data.Size())
 	var f *b2.File
-	f, err = u.UploadFile(l.ctx, hr, int(hr.Size()), object, contentType, sha1AtEOF, metadata)
+	f, err = u.UploadFile(l.ctx, hr, int(hr.Size()), object, contentType, sha1AtEOF, opts.UserDefined)
 	if err != nil {
 		logger.LogIf(ctx, err)
 		return objInfo, b2ToObjectError(err, bucket, object)
@@ -634,16 +636,16 @@ func (l *b2Objects) ListMultipartUploads(ctx context.Context, bucket string, pre
 // Each large file must consist of at least 2 parts, and all of the parts except the
 // last one must be at least 5MB in size. The last part must contain at least one byte.
 // For more information - https://www.backblaze.com/b2/docs/large_files.html
-func (l *b2Objects) NewMultipartUpload(ctx context.Context, bucket string, object string, metadata map[string]string, o minio.ObjectOptions) (string, error) {
+func (l *b2Objects) NewMultipartUpload(ctx context.Context, bucket string, object string, opts minio.ObjectOptions) (string, error) {
 	var uploadID string
 	bkt, err := l.Bucket(ctx, bucket)
 	if err != nil {
 		return uploadID, err
 	}
 
-	contentType := metadata["content-type"]
-	delete(metadata, "content-type")
-	lf, err := bkt.StartLargeFile(l.ctx, object, contentType, metadata)
+	contentType := opts.UserDefined["content-type"]
+	delete(opts.UserDefined, "content-type")
+	lf, err := bkt.StartLargeFile(l.ctx, object, contentType, opts.UserDefined)
 	if err != nil {
 		logger.LogIf(ctx, err)
 		return uploadID, b2ToObjectError(err, bucket, object)
@@ -653,7 +655,8 @@ func (l *b2Objects) NewMultipartUpload(ctx context.Context, bucket string, objec
 }
 
 // PutObjectPart puts a part of object in bucket, uses B2's LargeFile upload API.
-func (l *b2Objects) PutObjectPart(ctx context.Context, bucket string, object string, uploadID string, partID int, data *h2.Reader, opts minio.ObjectOptions) (pi minio.PartInfo, err error) {
+func (l *b2Objects) PutObjectPart(ctx context.Context, bucket string, object string, uploadID string, partID int, r *minio.PutObjReader, opts minio.ObjectOptions) (pi minio.PartInfo, err error) {
+	data := r.Reader
 	bkt, err := l.Bucket(ctx, bucket)
 	if err != nil {
 		return pi, err
@@ -681,7 +684,7 @@ func (l *b2Objects) PutObjectPart(ctx context.Context, bucket string, object str
 }
 
 // ListObjectParts returns all object parts for specified object in specified bucket, uses B2's LargeFile upload API.
-func (l *b2Objects) ListObjectParts(ctx context.Context, bucket string, object string, uploadID string, partNumberMarker int, maxParts int) (lpi minio.ListPartsInfo, err error) {
+func (l *b2Objects) ListObjectParts(ctx context.Context, bucket string, object string, uploadID string, partNumberMarker int, maxParts int, opts minio.ObjectOptions) (lpi minio.ListPartsInfo, err error) {
 	bkt, err := l.Bucket(ctx, bucket)
 	if err != nil {
 		return lpi, err
@@ -726,7 +729,7 @@ func (l *b2Objects) AbortMultipartUpload(ctx context.Context, bucket string, obj
 }
 
 // CompleteMultipartUpload completes ongoing multipart upload and finalizes object, uses B2's LargeFile upload API.
-func (l *b2Objects) CompleteMultipartUpload(ctx context.Context, bucket string, object string, uploadID string, uploadedParts []minio.CompletePart) (oi minio.ObjectInfo, err error) {
+func (l *b2Objects) CompleteMultipartUpload(ctx context.Context, bucket string, object string, uploadID string, uploadedParts []minio.CompletePart, opts minio.ObjectOptions) (oi minio.ObjectInfo, err error) {
 	bkt, err := l.Bucket(ctx, bucket)
 	if err != nil {
 		return oi, err

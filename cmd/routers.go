@@ -41,22 +41,22 @@ func registerDistXLRouters(router *mux.Router, endpoints EndpointList) {
 	// Register distributed namespace lock.
 	registerDistNSLockRouter(router)
 
-	// Register S3 peer communication router.
+	// Register peer communication router.
 	registerPeerRPCRouter(router)
 }
 
 // List of some generic handlers which are applied for all incoming requests.
 var globalHandlers = []HandlerFunc{
-	// set x-amz-request-id header.
-	addrequestIDHeader,
+	// set x-amz-request-id, x-minio-deployment-id header.
+	addCustomHeaders,
 	// set HTTP security headers such as Content-Security-Policy.
 	addSecurityHeaders,
 	// Forward path style requests to actual host in a bucket federated setup.
 	setBucketForwardingHandler,
 	// Ratelimit the incoming requests using a token bucket algorithm
 	setRateLimitHandler,
-	// Validate all the incoming paths.
-	setPathValidityHandler,
+	// Validate all the incoming requests.
+	setRequestValidityHandler,
 	// Network statistics
 	setHTTPStatsHandler,
 	// Limits all requests size to a maximum fixed limit
@@ -101,14 +101,11 @@ func configureServerHandler(endpoints EndpointList) (http.Handler, error) {
 		registerDistXLRouters(router, endpoints)
 	}
 
-	// Add STS router only enabled if etcd is configured.
+	// Add STS router always.
 	registerSTSRouter(router)
 
-	// Add Admin RPC router
-	registerAdminRPCRouter(router)
-
-	// Add Admin router.
-	registerAdminRouter(router)
+	// Add Admin router, all APIs are enabled in server mode.
+	registerAdminRouter(router, true, true)
 
 	// Add healthcheck router
 	registerHealthCheckRouter(router)
@@ -123,8 +120,8 @@ func configureServerHandler(endpoints EndpointList) (http.Handler, error) {
 		}
 	}
 
-	// Add API router.
-	registerAPIRouter(router)
+	// Add API router, additionally all server mode support encryption.
+	registerAPIRouter(router, true)
 
 	// Register rest of the handlers.
 	return registerHandlers(router, globalHandlers...), nil

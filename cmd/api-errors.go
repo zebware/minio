@@ -22,12 +22,17 @@ import (
 	"fmt"
 	"net/http"
 
+	"github.com/Azure/azure-sdk-for-go/storage"
+	"github.com/aliyun/aliyun-oss-go-sdk/oss"
+	"google.golang.org/api/googleapi"
+
+	minio "github.com/minio/minio-go"
 	"github.com/minio/minio/cmd/crypto"
+	"github.com/minio/minio/cmd/logger"
 	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/dns"
 	"github.com/minio/minio/pkg/event"
 	"github.com/minio/minio/pkg/hash"
-	"github.com/minio/minio/pkg/s3select"
 )
 
 // APIError structure
@@ -68,6 +73,7 @@ const (
 	ErrInvalidCopyPartRange
 	ErrInvalidCopyPartRangeSource
 	ErrInvalidMaxKeys
+	ErrInvalidEncodingMethod
 	ErrInvalidMaxUploads
 	ErrInvalidMaxParts
 	ErrInvalidPartNumberMarker
@@ -85,6 +91,7 @@ const (
 	ErrNoSuchBucketPolicy
 	ErrNoSuchKey
 	ErrNoSuchUpload
+	ErrNoSuchVersion
 	ErrNotImplemented
 	ErrPreconditionFailed
 	ErrRequestTimeTooSkewed
@@ -150,6 +157,9 @@ const (
 	ErrKMSNotConfigured
 	ErrKMSAuthFailure
 
+	ErrNoAccessKey
+	ErrInvalidToken
+
 	// Bucket notification related errors.
 	ErrEventNotification
 	ErrARNNotification
@@ -208,7 +218,7 @@ const (
 	ErrHealOverlappingPaths
 	ErrIncorrectContinuationToken
 
-	//S3 Select Errors
+	// S3 Select Errors
 	ErrEmptyRequestBody
 	ErrUnsupportedFunction
 	ErrInvalidExpressionType
@@ -292,14 +302,27 @@ const (
 	ErrEvaluatorInvalidTimestampFormatPatternSymbol
 	ErrEvaluatorBindingDoesNotExist
 	ErrMissingHeaders
+	ErrInvalidColumnIndex
+
 	ErrAdminConfigNotificationTargetsFailed
 	ErrAdminProfilerNotEnabled
 	ErrInvalidDecompressedSize
+	ErrAddUserInvalidArgument
 )
+
+type errorCodeMap map[APIErrorCode]APIError
+
+func (e errorCodeMap) ToAPIErr(errCode APIErrorCode) APIError {
+	apiErr, ok := e[errCode]
+	if !ok {
+		return e[ErrInternalError]
+	}
+	return apiErr
+}
 
 // error code to APIError structure, these fields carry respective
 // descriptions for all the error responses.
-var errorCodeResponse = map[APIErrorCode]APIError{
+var errorCodes = errorCodeMap{
 	ErrInvalidCopyDest: {
 		Code:           "InvalidRequest",
 		Description:    "This copy request is illegal because it is trying to copy an object to itself without changing the object's metadata, storage class, website redirect location or encryption attributes.",
@@ -333,6 +356,11 @@ var errorCodeResponse = map[APIErrorCode]APIError{
 	ErrInvalidMaxKeys: {
 		Code:           "InvalidArgument",
 		Description:    "Argument maxKeys must be an integer between 0 and 2147483647",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
+	ErrInvalidEncodingMethod: {
+		Code:           "InvalidArgument",
+		Description:    "Invalid Encoding Method specified in Request",
 		HTTPStatusCode: http.StatusBadRequest,
 	},
 	ErrInvalidMaxParts: {
@@ -438,6 +466,11 @@ var errorCodeResponse = map[APIErrorCode]APIError{
 	ErrNoSuchUpload: {
 		Code:           "NoSuchUpload",
 		Description:    "The specified multipart upload does not exist. The upload ID may be invalid, or the upload may have been aborted or completed.",
+		HTTPStatusCode: http.StatusNotFound,
+	},
+	ErrNoSuchVersion: {
+		Code:           "NoSuchVersion",
+		Description:    "Indicates that the version ID specified in the request does not match an existing version.",
 		HTTPStatusCode: http.StatusNotFound,
 	},
 	ErrNotImplemented: {
@@ -805,6 +838,16 @@ var errorCodeResponse = map[APIErrorCode]APIError{
 		Code:           "InvalidArgument",
 		Description:    "Server side encryption specified but KMS authorization failed",
 		HTTPStatusCode: http.StatusBadRequest,
+	},
+	ErrNoAccessKey: {
+		Code:           "AccessDenied",
+		Description:    "No AWSAccessKey was presented",
+		HTTPStatusCode: http.StatusForbidden,
+	},
+	ErrInvalidToken: {
+		Code:           "InvalidTokenId",
+		Description:    "The security token included in the request is invalid",
+		HTTPStatusCode: http.StatusForbidden,
 	},
 
 	/// S3 extensions.
@@ -1416,10 +1459,20 @@ var errorCodeResponse = map[APIErrorCode]APIError{
 		Description:    "Some headers in the query are missing from the file. Check the file and try again.",
 		HTTPStatusCode: http.StatusBadRequest,
 	},
+	ErrInvalidColumnIndex: {
+		Code:           "InvalidColumnIndex",
+		Description:    "The column index is invalid. Please check the service documentation and try again.",
+		HTTPStatusCode: http.StatusBadRequest,
+	},
 	ErrInvalidDecompressedSize: {
 		Code:           "XMinioInvalidDecompressedSize",
 		Description:    "The data provided is unfit for decompression",
 		HTTPStatusCode: http.StatusBadRequest,
+	},
+	ErrAddUserInvalidArgument: {
+		Code:           "XMinioInvalidIAMCredentials",
+		Description:    "User is not allowed to be same as admin access key",
+		HTTPStatusCode: http.StatusConflict,
 	},
 	// Add your error structure here.
 }
@@ -1427,7 +1480,7 @@ var errorCodeResponse = map[APIErrorCode]APIError{
 // toAPIErrorCode - Converts embedded errors. Convenience
 // function written to handle all cases where we have known types of
 // errors returned by underlying layers.
-func toAPIErrorCode(err error) (apiErr APIErrorCode) {
+func toAPIErrorCode(ctx context.Context, err error) (apiErr APIErrorCode) {
 	if err == nil {
 		return ErrNone
 	}
@@ -1483,165 +1536,6 @@ func toAPIErrorCode(err error) (apiErr APIErrorCode) {
 		apiErr = ErrKMSAuthFailure
 	case errOperationTimedOut, context.Canceled, context.DeadlineExceeded:
 		apiErr = ErrOperationTimedOut
-	}
-	switch err {
-	case s3select.ErrBusy:
-		apiErr = ErrBusy
-	case s3select.ErrUnauthorizedAccess:
-		apiErr = ErrUnauthorizedAccess
-	case s3select.ErrExpressionTooLong:
-		apiErr = ErrExpressionTooLong
-	case s3select.ErrIllegalSQLFunctionArgument:
-		apiErr = ErrIllegalSQLFunctionArgument
-	case s3select.ErrInvalidKeyPath:
-		apiErr = ErrInvalidKeyPath
-	case s3select.ErrInvalidCompressionFormat:
-		apiErr = ErrInvalidCompressionFormat
-	case s3select.ErrInvalidFileHeaderInfo:
-		apiErr = ErrInvalidFileHeaderInfo
-	case s3select.ErrInvalidJSONType:
-		apiErr = ErrInvalidJSONType
-	case s3select.ErrInvalidQuoteFields:
-		apiErr = ErrInvalidQuoteFields
-	case s3select.ErrInvalidRequestParameter:
-		apiErr = ErrInvalidRequestParameter
-	case s3select.ErrInvalidDataType:
-		apiErr = ErrInvalidDataType
-	case s3select.ErrInvalidTextEncoding:
-		apiErr = ErrInvalidTextEncoding
-	case s3select.ErrInvalidTableAlias:
-		apiErr = ErrInvalidTableAlias
-	case s3select.ErrMissingRequiredParameter:
-		apiErr = ErrMissingRequiredParameter
-	case s3select.ErrObjectSerializationConflict:
-		apiErr = ErrObjectSerializationConflict
-	case s3select.ErrUnsupportedSQLOperation:
-		apiErr = ErrUnsupportedSQLOperation
-	case s3select.ErrUnsupportedSQLStructure:
-		apiErr = ErrUnsupportedSQLStructure
-	case s3select.ErrUnsupportedSyntax:
-		apiErr = ErrUnsupportedSyntax
-	case s3select.ErrUnsupportedRangeHeader:
-		apiErr = ErrUnsupportedRangeHeader
-	case s3select.ErrLexerInvalidChar:
-		apiErr = ErrLexerInvalidChar
-	case s3select.ErrLexerInvalidOperator:
-		apiErr = ErrLexerInvalidOperator
-	case s3select.ErrLexerInvalidLiteral:
-		apiErr = ErrLexerInvalidLiteral
-	case s3select.ErrLexerInvalidIONLiteral:
-		apiErr = ErrLexerInvalidIONLiteral
-	case s3select.ErrParseExpectedDatePart:
-		apiErr = ErrParseExpectedDatePart
-	case s3select.ErrParseExpectedKeyword:
-		apiErr = ErrParseExpectedKeyword
-	case s3select.ErrParseExpectedTokenType:
-		apiErr = ErrParseExpectedTokenType
-	case s3select.ErrParseExpected2TokenTypes:
-		apiErr = ErrParseExpected2TokenTypes
-	case s3select.ErrParseExpectedNumber:
-		apiErr = ErrParseExpectedNumber
-	case s3select.ErrParseExpectedRightParenBuiltinFunctionCall:
-		apiErr = ErrParseExpectedRightParenBuiltinFunctionCall
-	case s3select.ErrParseExpectedTypeName:
-		apiErr = ErrParseExpectedTypeName
-	case s3select.ErrParseExpectedWhenClause:
-		apiErr = ErrParseExpectedWhenClause
-	case s3select.ErrParseUnsupportedToken:
-		apiErr = ErrParseUnsupportedToken
-	case s3select.ErrParseUnsupportedLiteralsGroupBy:
-		apiErr = ErrParseUnsupportedLiteralsGroupBy
-	case s3select.ErrParseExpectedMember:
-		apiErr = ErrParseExpectedMember
-	case s3select.ErrParseUnsupportedSelect:
-		apiErr = ErrParseUnsupportedSelect
-	case s3select.ErrParseUnsupportedCase:
-		apiErr = ErrParseUnsupportedCase
-	case s3select.ErrParseUnsupportedCaseClause:
-		apiErr = ErrParseUnsupportedCaseClause
-	case s3select.ErrParseUnsupportedAlias:
-		apiErr = ErrParseUnsupportedAlias
-	case s3select.ErrParseUnsupportedSyntax:
-		apiErr = ErrParseUnsupportedSyntax
-	case s3select.ErrParseUnknownOperator:
-		apiErr = ErrParseUnknownOperator
-	case s3select.ErrParseMissingIdentAfterAt:
-		apiErr = ErrParseMissingIdentAfterAt
-	case s3select.ErrParseUnexpectedOperator:
-		apiErr = ErrParseUnexpectedOperator
-	case s3select.ErrParseUnexpectedTerm:
-		apiErr = ErrParseUnexpectedTerm
-	case s3select.ErrParseUnexpectedToken:
-		apiErr = ErrParseUnexpectedToken
-	case s3select.ErrParseUnexpectedKeyword:
-		apiErr = ErrParseUnexpectedKeyword
-	case s3select.ErrParseExpectedExpression:
-		apiErr = ErrParseExpectedExpression
-	case s3select.ErrParseExpectedLeftParenAfterCast:
-		apiErr = ErrParseExpectedLeftParenAfterCast
-	case s3select.ErrParseExpectedLeftParenValueConstructor:
-		apiErr = ErrParseExpectedLeftParenValueConstructor
-	case s3select.ErrParseExpectedLeftParenBuiltinFunctionCall:
-		apiErr = ErrParseExpectedLeftParenBuiltinFunctionCall
-	case s3select.ErrParseExpectedArgumentDelimiter:
-		apiErr = ErrParseExpectedArgumentDelimiter
-	case s3select.ErrParseCastArity:
-		apiErr = ErrParseCastArity
-	case s3select.ErrParseInvalidTypeParam:
-		apiErr = ErrParseInvalidTypeParam
-	case s3select.ErrParseEmptySelect:
-		apiErr = ErrParseEmptySelect
-	case s3select.ErrParseSelectMissingFrom:
-		apiErr = ErrParseSelectMissingFrom
-	case s3select.ErrParseExpectedIdentForGroupName:
-		apiErr = ErrParseExpectedIdentForGroupName
-	case s3select.ErrParseExpectedIdentForAlias:
-		apiErr = ErrParseExpectedIdentForAlias
-	case s3select.ErrParseUnsupportedCallWithStar:
-		apiErr = ErrParseUnsupportedCallWithStar
-	case s3select.ErrParseNonUnaryAgregateFunctionCall:
-		apiErr = ErrParseNonUnaryAgregateFunctionCall
-	case s3select.ErrParseMalformedJoin:
-		apiErr = ErrParseMalformedJoin
-	case s3select.ErrParseExpectedIdentForAt:
-		apiErr = ErrParseExpectedIdentForAt
-	case s3select.ErrParseAsteriskIsNotAloneInSelectList:
-		apiErr = ErrParseAsteriskIsNotAloneInSelectList
-	case s3select.ErrParseCannotMixSqbAndWildcardInSelectList:
-		apiErr = ErrParseCannotMixSqbAndWildcardInSelectList
-	case s3select.ErrParseInvalidContextForWildcardInSelectList:
-		apiErr = ErrParseInvalidContextForWildcardInSelectList
-	case s3select.ErrIncorrectSQLFunctionArgumentType:
-		apiErr = ErrIncorrectSQLFunctionArgumentType
-	case s3select.ErrValueParseFailure:
-		apiErr = ErrValueParseFailure
-	case s3select.ErrIntegerOverflow:
-		apiErr = ErrIntegerOverflow
-	case s3select.ErrLikeInvalidInputs:
-		apiErr = ErrLikeInvalidInputs
-	case s3select.ErrCastFailed:
-		apiErr = ErrCastFailed
-	case s3select.ErrInvalidCast:
-		apiErr = ErrInvalidCast
-	case s3select.ErrEvaluatorInvalidTimestampFormatPattern:
-		apiErr = ErrEvaluatorInvalidTimestampFormatPattern
-	case s3select.ErrEvaluatorInvalidTimestampFormatPatternSymbolForParsing:
-		apiErr = ErrEvaluatorInvalidTimestampFormatPatternSymbolForParsing
-	case s3select.ErrEvaluatorTimestampFormatPatternDuplicateFields:
-		apiErr = ErrEvaluatorTimestampFormatPatternDuplicateFields
-	case s3select.ErrEvaluatorTimestampFormatPatternHourClockAmPmMismatch:
-		apiErr = ErrEvaluatorTimestampFormatPatternHourClockAmPmMismatch
-	case s3select.ErrEvaluatorUnterminatedTimestampFormatPatternToken:
-		apiErr = ErrEvaluatorUnterminatedTimestampFormatPatternToken
-	case s3select.ErrEvaluatorInvalidTimestampFormatPatternToken:
-		apiErr = ErrEvaluatorInvalidTimestampFormatPatternToken
-	case s3select.ErrEvaluatorInvalidTimestampFormatPatternSymbol:
-		apiErr = ErrEvaluatorInvalidTimestampFormatPatternSymbol
-	case s3select.ErrEvaluatorBindingDoesNotExist:
-		apiErr = ErrEvaluatorBindingDoesNotExist
-	case s3select.ErrMissingHeaders:
-		apiErr = ErrMissingHeaders
-
 	}
 
 	// Compression errors
@@ -1754,6 +1648,64 @@ func toAPIErrorCode(err error) (apiErr APIErrorCode) {
 		apiErr = ErrObjectTampered
 	default:
 		apiErr = ErrInternalError
+		// Make sure to log the errors which we cannot translate
+		// to a meaningful S3 API errors. This is added to aid in
+		// debugging unexpected/unhandled errors.
+		logger.LogIf(ctx, err)
+	}
+
+	return apiErr
+}
+
+var noError = APIError{}
+
+// toAPIError - Converts embedded errors. Convenience
+// function written to handle all cases where we have known types of
+// errors returned by underlying layers.
+func toAPIError(ctx context.Context, err error) APIError {
+	if err == nil {
+		return noError
+	}
+
+	var apiErr = errorCodes.ToAPIErr(toAPIErrorCode(ctx, err))
+	if apiErr.Code == "InternalError" {
+		// If we see an internal error try to interpret
+		// any underlying errors if possible depending on
+		// their internal error types. This code is only
+		// useful with gateway implementations.
+		switch e := err.(type) {
+		case minio.ErrorResponse:
+			apiErr = APIError{
+				Code:           e.Code,
+				Description:    e.Message,
+				HTTPStatusCode: e.StatusCode,
+			}
+		case *googleapi.Error:
+			apiErr = APIError{
+				Code:           "XGCSInternalError",
+				Description:    e.Message,
+				HTTPStatusCode: e.Code,
+			}
+			// GCS may send multiple errors, just pick the first one
+			// since S3 only sends one Error XML response.
+			if len(e.Errors) >= 1 {
+				apiErr.Code = e.Errors[0].Reason
+
+			}
+		case storage.AzureStorageServiceError:
+			apiErr = APIError{
+				Code:           e.Code,
+				Description:    e.Message,
+				HTTPStatusCode: e.StatusCode,
+			}
+		case oss.ServiceError:
+			apiErr = APIError{
+				Code:           e.Code,
+				Description:    e.Message,
+				HTTPStatusCode: e.StatusCode,
+			}
+			// Add more Gateway SDKs here if any in future.
+		}
 	}
 
 	return apiErr
@@ -1761,20 +1713,23 @@ func toAPIErrorCode(err error) (apiErr APIErrorCode) {
 
 // getAPIError provides API Error for input API error code.
 func getAPIError(code APIErrorCode) APIError {
-	if apiErr, ok := errorCodeResponse[code]; ok {
+	if apiErr, ok := errorCodes[code]; ok {
 		return apiErr
 	}
-	return errorCodeResponse[ErrInternalError]
+	return errorCodes.ToAPIErr(ErrInternalError)
 }
 
 // getErrorResponse gets in standard error and resource value and
 // provides a encodable populated response values
-func getAPIErrorResponse(err APIError, resource, requestid string) APIErrorResponse {
+func getAPIErrorResponse(ctx context.Context, err APIError, resource, requestID, hostID string) APIErrorResponse {
+	reqInfo := logger.GetReqInfo(ctx)
 	return APIErrorResponse{
-		Code:      err.Code,
-		Message:   err.Description,
-		Resource:  resource,
-		RequestID: requestid,
-		HostID:    "3L137",
+		Code:       err.Code,
+		Message:    err.Description,
+		BucketName: reqInfo.BucketName,
+		Key:        reqInfo.ObjectName,
+		Resource:   resource,
+		RequestID:  requestID,
+		HostID:     hostID,
 	}
 }

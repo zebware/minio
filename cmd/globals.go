@@ -20,7 +20,6 @@ import (
 	"crypto/x509"
 	"fmt"
 	"os"
-	"runtime"
 	"time"
 
 	isatty "github.com/mattn/go-isatty"
@@ -34,13 +33,15 @@ import (
 	"github.com/minio/minio/pkg/auth"
 	"github.com/minio/minio/pkg/certs"
 	"github.com/minio/minio/pkg/dns"
-	"github.com/minio/minio/pkg/iam/policy"
+	iampolicy "github.com/minio/minio/pkg/iam/policy"
 	"github.com/minio/minio/pkg/iam/validator"
 )
 
 // minio configuration related constants.
 const (
 	globalMinioCertExpireWarnDays = time.Hour * 24 * 30 // 30 days.
+
+	globalMinioDefaultPort = "9000"
 
 	globalMinioDefaultRegion = ""
 	// This is a sha256 output of ``arn:aws:iam::minio:user/admin``,
@@ -77,10 +78,11 @@ const (
 	// date and server date during signature verification.
 	globalMaxSkewTime = 15 * time.Minute // 15 minutes skew allowed.
 
-	// Expiry duration after which the multipart uploads are deemed stale.
-	globalMultipartExpiry = time.Hour * 24 * 14 // 2 weeks.
-	// Cleanup interval when the stale multipart cleanup is initiated.
-	globalMultipartCleanupInterval = time.Hour * 24 // 24 hrs.
+	// GlobalMultipartExpiry - Expiry duration after which the multipart uploads are deemed stale.
+	GlobalMultipartExpiry = time.Hour * 24 * 14 // 2 weeks.
+	// GlobalMultipartCleanupInterval - Cleanup interval when the stale multipart cleanup is initiated.
+	GlobalMultipartCleanupInterval = time.Hour * 24 // 24 hrs.
+
 	// Refresh interval to update in-memory bucket policy cache.
 	globalRefreshBucketPolicyInterval = 5 * time.Minute
 	// Refresh interval to update in-memory iam config cache.
@@ -89,6 +91,12 @@ const (
 	// Limit of location constraint XML for unauthenticted PUT bucket operations.
 	maxLocationConstraintSize = 3 * humanize.MiByte
 )
+
+var globalCLIContext = struct {
+	JSON, Quiet bool
+	Anonymous   bool
+	Addr        string
+}{}
 
 var (
 	// Indicates the total number of erasure coded sets configured.
@@ -127,7 +135,7 @@ var (
 	// Minio local server address (in `host:port` format)
 	globalMinioAddr = ""
 	// Minio default port, can be changed through command line.
-	globalMinioPort = "9000"
+	globalMinioPort = globalMinioDefaultPort
 	// Holds the host that was passed using --address
 	globalMinioHost = ""
 
@@ -153,12 +161,6 @@ var (
 	// File to log HTTP request/response headers and body.
 	globalHTTPTraceFile *os.File
 
-	// List of admin peers.
-	globalAdminPeers = adminPeers{}
-
-	// Minio server user agent string.
-	globalServerUserAgent = "Minio/" + ReleaseTag + " (" + runtime.GOOS + "; " + runtime.GOARCH + ")"
-
 	globalEndpoints EndpointList
 
 	// Global server's network statistics
@@ -173,9 +175,8 @@ var (
 	globalActiveCred  auth.Credentials
 	globalPublicCerts []*x509.Certificate
 
-	globalIsEnvDomainName bool
-	globalDomainName      string        // Root domain for virtual host style requests
-	globalDomainIPs       set.StringSet // Root domain IP address(s) for a distributed Minio deployment
+	globalDomainNames []string      // Root domains for virtual host style requests
+	globalDomainIPs   set.StringSet // Root domain IP address(s) for a distributed Minio deployment
 
 	globalListingTimeout   = newDynamicTimeout( /*30*/ 600*time.Second /*5*/, 600*time.Second) // timeout for listing related ops
 	globalObjectTimeout    = newDynamicTimeout( /*1*/ 10*time.Minute /*10*/, 600*time.Second)  // timeout for Object API related ops
@@ -228,10 +229,14 @@ var (
 
 	// KMS key id
 	globalKMSKeyID string
-	// Allocated KMS
-	globalKMS crypto.KMS
-	// KMS config
-	globalKMSConfig crypto.KMSConfig
+
+	// GlobalKMS initialized KMS configuration
+	GlobalKMS crypto.KMS
+
+	// Auto-Encryption, if enabled, turns any non-SSE-C request
+	// into an SSE-S3 request. If enabled a valid, non-empty KMS
+	// configuration must be present.
+	globalAutoEncryption bool
 
 	// Is compression include extensions/content-types set.
 	globalIsEnvCompression bool
@@ -254,6 +259,12 @@ var (
 
 	// OPA policy system.
 	globalPolicyOPA *iampolicy.Opa
+
+	// Deployment ID - unique per deployment
+	globalDeploymentID string
+
+	// GlobalGatewaySSE sse options
+	GlobalGatewaySSE gatewaySSE
 
 	// Add new variable global values here.
 )
@@ -342,7 +353,6 @@ func getGlobalInfo() (globalInfo map[string]interface{}) {
 		"isEnvRegion":      globalIsEnvRegion,
 		"isSSL":            globalIsSSL,
 		"serverRegion":     globalServerRegion,
-		"serverUserAgent":  globalServerUserAgent,
 		// Add more relevant global settings here.
 	}
 

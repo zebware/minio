@@ -17,13 +17,14 @@
 package cmd
 
 import (
+	"io"
 	"io/ioutil"
 	"log"
 	"os"
 	"testing"
 )
 
-func TestBitrotReaderWriter(t *testing.T) {
+func testBitrotReaderWriterAlgo(t *testing.T, bitrotAlgo BitrotAlgorithm) {
 	tmpDir, err := ioutil.TempDir("", "")
 	if err != nil {
 		log.Fatal(err)
@@ -40,32 +41,44 @@ func TestBitrotReaderWriter(t *testing.T) {
 
 	disk.MakeVol(volume)
 
-	writer := newBitrotWriter(disk, volume, filePath, HighwayHash256)
+	writer := newBitrotWriter(disk, volume, filePath, 35, bitrotAlgo, 10)
 
-	err = writer.Append([]byte("aaaaaaaaa"))
+	_, err = writer.Write([]byte("aaaaaaaaaa"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = writer.Append([]byte("a"))
+	_, err = writer.Write([]byte("aaaaaaaaaa"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = writer.Append([]byte("aaaaaaaaaa"))
+	_, err = writer.Write([]byte("aaaaaaaaaa"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = writer.Append([]byte("aaaaa"))
+	_, err = writer.Write([]byte("aaaaa"))
 	if err != nil {
 		log.Fatal(err)
 	}
-	err = writer.Append([]byte("aaaaaaaaaa"))
-	if err != nil {
-		log.Fatal(err)
-	}
+	writer.(io.Closer).Close()
 
-	reader := newBitrotReader(disk, volume, filePath, HighwayHash256, 35, writer.Sum())
-
-	if _, err = reader.ReadChunk(0, 35); err != nil {
+	reader := newBitrotReader(disk, volume, filePath, 35, bitrotAlgo, bitrotWriterSum(writer), 10)
+	b := make([]byte, 10)
+	if _, err = reader.ReadAt(b, 0); err != nil {
 		log.Fatal(err)
+	}
+	if _, err = reader.ReadAt(b, 10); err != nil {
+		log.Fatal(err)
+	}
+	if _, err = reader.ReadAt(b, 20); err != nil {
+		log.Fatal(err)
+	}
+	if _, err = reader.ReadAt(b[:5], 30); err != nil {
+		log.Fatal(err)
+	}
+}
+
+func TestAllBitrotAlgorithms(t *testing.T) {
+	for bitrotAlgo := range bitrotAlgorithms {
+		testBitrotReaderWriterAlgo(t, bitrotAlgo)
 	}
 }

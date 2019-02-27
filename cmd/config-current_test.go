@@ -130,8 +130,8 @@ func TestServerConfigWithEnvs(t *testing.T) {
 	}
 
 	// Check if serverConfig has the correct domain
-	if globalDomainName != "domain.com" {
-		t.Errorf("Expected Domain to be `domain.com`, found " + globalDomainName)
+	if globalDomainNames[0] != "domain.com" {
+		t.Errorf("Expected Domain to be `domain.com`, found " + globalDomainNames[0])
 	}
 }
 
@@ -188,7 +188,7 @@ func TestValidateConfig(t *testing.T) {
 		{`{"version": "` + v + `", "credential": { "accessKey": "minio", "secretKey": "minio123" }, "region": "us-east-1", "browser": "on", "notify": { "amqp": { "1": { "enable": true, "url": "", "exchange": "", "routingKey": "", "exchangeType": "", "mandatory": false, "immediate": false, "durable": false, "internal": false, "noWait": false, "autoDeleted": false }}}}`, false},
 
 		// Test 12 - Test NATS
-		{`{"version": "` + v + `", "credential": { "accessKey": "minio", "secretKey": "minio123" }, "region": "us-east-1", "browser": "on", "notify": { "nats": { "1": { "enable": true, "address": "", "subject": "", "username": "", "password": "", "token": "", "secure": false, "pingInterval": 0, "streaming": { "enable": false, "clusterID": "", "clientID": "", "async": false, "maxPubAcksInflight": 0 } } }}}`, false},
+		{`{"version": "` + v + `", "credential": { "accessKey": "minio", "secretKey": "minio123" }, "region": "us-east-1", "browser": "on", "notify": { "nats": { "1": { "enable": true, "address": "", "subject": "", "username": "", "password": "", "token": "", "secure": false, "pingInterval": 0, "streaming": { "enable": false, "clusterID": "", "async": false, "maxPubAcksInflight": 0 } } }}}`, false},
 
 		// Test 13 - Test ElasticSearch
 		{`{"version": "` + v + `", "credential": { "accessKey": "minio", "secretKey": "minio123" }, "region": "us-east-1", "browser": "on", "notify": { "elasticsearch": { "1": { "enable": true, "url": "", "index": "" } }}}`, false},
@@ -233,7 +233,10 @@ func TestValidateConfig(t *testing.T) {
 		{`{"version": "` + v + `", "credential": { "accessKey": "minio", "secretKey": "minio123" }, "region": "us-east-1", "browser": "on", "notify": { "redis": { "1": { "enable": true, "format": "namespace", "address": "example.com:80", "password": "xxx", "key": "key1" } }}}`, true},
 
 		// Test 27 - Test MQTT
-		{`{"version": "` + v + `", "credential": { "accessKey": "minio", "secretKey": "minio123" }, "region": "us-east-1", "browser": "on", "notify": { "mqtt": { "1": { "enable": true, "broker": "",  "topic": "", "qos": 0, "clientId": "", "username": "", "password": ""}}}}`, false},
+		{`{"version": "` + v + `", "credential": { "accessKey": "minio", "secretKey": "minio123" }, "region": "us-east-1", "browser": "on", "notify": { "mqtt": { "1": { "enable": true, "broker": "",  "topic": "", "qos": 0, "username": "", "password": "", "queueDir": "", "queueLimit": 0}}}}`, false},
+
+		// Test 28 - Test NSQ
+		{`{"version": "` + v + `", "credential": { "accessKey": "minio", "secretKey": "minio123" }, "region": "us-east-1", "browser": "on", "notify": { "nsq": { "1": { "enable": true, "nsqdAddress": "", "topic": ""} }}}`, false},
 	}
 
 	for i, testCase := range testCases {
@@ -294,47 +297,53 @@ func TestConfigDiff(t *testing.T) {
 		},
 		// 7
 		{
+			&serverConfig{Notify: notifier{NSQ: map[string]target.NSQArgs{"1": {Enable: true}}}},
+			&serverConfig{Notify: notifier{NSQ: map[string]target.NSQArgs{"1": {Enable: false}}}},
+			"NSQ Notification configuration differs",
+		},
+		// 8
+		{
 			&serverConfig{Notify: notifier{Elasticsearch: map[string]target.ElasticsearchArgs{"1": {Enable: true}}}},
 			&serverConfig{Notify: notifier{Elasticsearch: map[string]target.ElasticsearchArgs{"1": {Enable: false}}}},
 			"ElasticSearch Notification configuration differs",
 		},
-		// 8
+		// 9
 		{
 			&serverConfig{Notify: notifier{Redis: map[string]target.RedisArgs{"1": {Enable: true}}}},
 			&serverConfig{Notify: notifier{Redis: map[string]target.RedisArgs{"1": {Enable: false}}}},
 			"Redis Notification configuration differs",
 		},
-		// 9
+		// 10
 		{
 			&serverConfig{Notify: notifier{PostgreSQL: map[string]target.PostgreSQLArgs{"1": {Enable: true}}}},
 			&serverConfig{Notify: notifier{PostgreSQL: map[string]target.PostgreSQLArgs{"1": {Enable: false}}}},
 			"PostgreSQL Notification configuration differs",
 		},
-		// 10
+		// 11
 		{
 			&serverConfig{Notify: notifier{Kafka: map[string]target.KafkaArgs{"1": {Enable: true}}}},
 			&serverConfig{Notify: notifier{Kafka: map[string]target.KafkaArgs{"1": {Enable: false}}}},
 			"Kafka Notification configuration differs",
 		},
-		// 11
+		// 12
 		{
 			&serverConfig{Notify: notifier{Webhook: map[string]target.WebhookArgs{"1": {Enable: true}}}},
 			&serverConfig{Notify: notifier{Webhook: map[string]target.WebhookArgs{"1": {Enable: false}}}},
 			"Webhook Notification configuration differs",
 		},
-		// 12
+		// 13
 		{
 			&serverConfig{Notify: notifier{MySQL: map[string]target.MySQLArgs{"1": {Enable: true}}}},
 			&serverConfig{Notify: notifier{MySQL: map[string]target.MySQLArgs{"1": {Enable: false}}}},
 			"MySQL Notification configuration differs",
 		},
-		// 13
+		// 14
 		{
 			&serverConfig{Notify: notifier{MQTT: map[string]target.MQTTArgs{"1": {Enable: true}}}},
 			&serverConfig{Notify: notifier{MQTT: map[string]target.MQTTArgs{"1": {Enable: false}}}},
 			"MQTT Notification configuration differs",
 		},
-		// 14
+		// 15
 		{
 			&serverConfig{Logger: loggerConfig{
 				Console: loggerConsole{Enabled: true},

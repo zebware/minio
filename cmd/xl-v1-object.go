@@ -19,12 +19,10 @@ package cmd
 import (
 	"bytes"
 	"context"
-	"encoding/hex"
 	"io"
 	"net/http"
 	"path"
 	"strconv"
-	"strings"
 	"sync"
 
 	"github.com/minio/minio/cmd/logger"
@@ -56,25 +54,6 @@ func (xl xlObjects) putObjectDir(ctx context.Context, bucket, object string, wri
 	wg.Wait()
 
 	return reduceWriteQuorumErrs(ctx, errs, objectOpIgnoredErrs, writeQuorum)
-}
-
-// prepareFile hints the bottom layer to optimize the creation of a new object
-func (xl xlObjects) prepareFile(ctx context.Context, bucket, object string, size int64, onlineDisks []StorageAPI, blockSize int64, dataBlocks, writeQuorum int) error {
-	pErrs := make([]error, len(onlineDisks))
-	// Calculate the real size of the part in one disk.
-	actualSize := getErasureShardFileSize(blockSize, size, dataBlocks)
-	// Prepare object creation in a all disks
-	for index, disk := range onlineDisks {
-		if disk != nil {
-			if err := disk.PrepareFile(bucket, object, actualSize); err != nil {
-				// Save error to reduce it later
-				pErrs[index] = err
-				// Ignore later access to disk which generated the error
-				onlineDisks[index] = nil
-			}
-		}
-	}
-	return reduceWriteQuorumErrs(ctx, pErrs, objectOpIgnoredErrs, writeQuorum)
 }
 
 /// Object Operations
@@ -152,8 +131,8 @@ func (xl xlObjects) CopyObject(ctx context.Context, srcBucket, srcObject, dstBuc
 		logger.LogIf(ctx, err)
 		return oi, toObjectErr(err, dstBucket, dstObject)
 	}
-
-	objInfo, err := xl.putObject(ctx, dstBucket, dstObject, hashReader, srcInfo.UserDefined, dstOpts)
+	putOpts := ObjectOptions{UserDefined: srcInfo.UserDefined, ServerSideEncryption: dstOpts.ServerSideEncryption}
+	objInfo, err := xl.putObject(ctx, dstBucket, dstObject, NewPutObjReader(hashReader, nil, nil), putOpts)
 	if err != nil {
 		return oi, toObjectErr(err, dstBucket, dstObject)
 	}
@@ -349,22 +328,24 @@ func (xl xlObjects) getObject(ctx context.Context, bucket, object string, startO
 			partLength = length - totalBytesRead
 		}
 
+		tillOffset := erasure.ShardFileTillOffset(partOffset, partLength, partSize)
 		// Get the checksums of the current part.
-		bitrotReaders := make([]*bitrotReader, len(onlineDisks))
+		readers := make([]io.ReaderAt, len(onlineDisks))
 		for index, disk := range onlineDisks {
 			if disk == OfflineDisk {
 				continue
 			}
 			checksumInfo := metaArr[index].Erasure.GetChecksumInfo(partName)
-			endOffset := getErasureShardFileEndOffset(partOffset, partLength, partSize, xlMeta.Erasure.BlockSize, xlMeta.Erasure.DataBlocks)
-			bitrotReaders[index] = newBitrotReader(disk, bucket, pathJoin(object, partName), checksumInfo.Algorithm, endOffset, checksumInfo.Hash)
+			readers[index] = newBitrotReader(disk, bucket, pathJoin(object, partName), tillOffset, checksumInfo.Algorithm, checksumInfo.Hash, erasure.ShardSize())
 		}
-
-		err := erasure.Decode(ctx, writer, bitrotReaders, partOffset, partLength, partSize)
+		err := erasure.Decode(ctx, writer, readers, partOffset, partLength, partSize)
+		// Note: we should not be defer'ing the following closeBitrotReaders() call as we are inside a for loop i.e if we use defer, we would accumulate a lot of open files by the time
+		// we return from this function.
+		closeBitrotReaders(readers)
 		if err != nil {
 			return toObjectErr(err, bucket, object)
 		}
-		for i, r := range bitrotReaders {
+		for i, r := range readers {
 			if r == nil {
 				onlineDisks[i] = OfflineDisk
 			}
@@ -448,78 +429,6 @@ func (xl xlObjects) GetObjectInfo(ctx context.Context, bucket, object string, op
 	return info, nil
 }
 
-func (xl xlObjects) isObjectCorrupted(metaArr []xlMetaV1, errs []error) (validMeta xlMetaV1, ok bool) {
-	// We can consider an object data not reliable
-	// when xl.json is not found in read quorum disks.
-	var notFoundXLJSON int
-	for _, readErr := range errs {
-		if readErr == errFileNotFound {
-			notFoundXLJSON++
-		}
-	}
-
-	for _, m := range metaArr {
-		if !m.IsValid() {
-			continue
-		}
-		validMeta = m
-		break
-	}
-
-	// Return if the object is indeed corrupted.
-	return validMeta, len(xl.getDisks())-notFoundXLJSON < validMeta.Erasure.DataBlocks
-}
-
-const xlCorruptedSuffix = ".CORRUPTED"
-
-// Renames the corrupted object and makes it visible.
-func renameCorruptedObject(ctx context.Context, bucket, object string, validMeta xlMetaV1, disks []StorageAPI, errs []error) {
-	writeQuorum := validMeta.Erasure.DataBlocks + 1
-
-	// Move all existing objects into corrupted suffix.
-	rename(ctx, disks, bucket, object, bucket, object+xlCorruptedSuffix, true, writeQuorum, []error{errFileNotFound})
-
-	tempObj := mustGetUUID()
-
-	// Get all the disks which do not have the file.
-	var cdisks = make([]StorageAPI, len(disks))
-	for i, merr := range errs {
-		if merr == errFileNotFound {
-			cdisks[i] = disks[i]
-		}
-	}
-
-	for _, disk := range cdisks {
-		if disk == nil {
-			continue
-		}
-
-		// Write empty part file on missing disks.
-		disk.AppendFile(minioMetaTmpBucket, pathJoin(tempObj, "part.1"), []byte{})
-
-		// Write algorithm hash for empty part file.
-		alg := validMeta.Erasure.Checksums[0].Algorithm.New()
-		alg.Write([]byte{})
-
-		// Update the checksums and part info.
-		validMeta.Erasure.Checksums[0] = ChecksumInfo{
-			Name:      validMeta.Erasure.Checksums[0].Name,
-			Algorithm: validMeta.Erasure.Checksums[0].Algorithm,
-			Hash:      alg.Sum(nil),
-		}
-		validMeta.Parts[0] = objectPartInfo{
-			Number: 1,
-			Name:   "part.1",
-		}
-
-		// Write the `xl.json` with the newly calculated metadata.
-		writeXLMetadata(ctx, disk, minioMetaTmpBucket, tempObj, validMeta)
-	}
-
-	// Finally rename all the parts into their respective locations.
-	rename(ctx, cdisks, minioMetaTmpBucket, tempObj, bucket, object+xlCorruptedSuffix, true, writeQuorum, []error{errFileNotFound})
-}
-
 // getObjectInfo - wrapper for reading object metadata and constructs ObjectInfo.
 func (xl xlObjects) getObjectInfo(ctx context.Context, bucket, object string) (objInfo ObjectInfo, err error) {
 	disks := xl.getDisks()
@@ -527,26 +436,9 @@ func (xl xlObjects) getObjectInfo(ctx context.Context, bucket, object string) (o
 	// Read metadata associated with the object from all disks.
 	metaArr, errs := readAllXLMetadata(ctx, disks, bucket, object)
 
-	var readQuorum int
-	// Having read quorum means we have xl.json in at least N/2 disks.
-	if !strings.HasSuffix(object, xlCorruptedSuffix) {
-		if validMeta, ok := xl.isObjectCorrupted(metaArr, errs); ok {
-			renameCorruptedObject(ctx, bucket, object, validMeta, disks, errs)
-			// Return err file not found since we renamed now the corrupted object
-			return objInfo, errFileNotFound
-		}
-
-		// Not a corrupted object, attempt to get readquorum properly.
-		readQuorum, _, err = objectQuorumFromMeta(ctx, xl, metaArr, errs)
-		if err != nil {
-			return objInfo, err
-		}
-
-	} else {
-
-		// If this is a corrupted object, change read quorum to N/2 disks
-		// so it will be visible to users, so they can delete it.
-		readQuorum = len(xl.getDisks()) / 2
+	readQuorum, _, err := objectQuorumFromMeta(ctx, xl, metaArr, errs)
+	if err != nil {
+		return objInfo, err
 	}
 
 	// List all the file commit ids from parts metadata.
@@ -639,7 +531,7 @@ func rename(ctx context.Context, disks []StorageAPI, srcBucket, srcEntry, dstBuc
 // until EOF, erasure codes the data across all disk and additionally
 // writes `xl.json` which carries the necessary metadata for future
 // object operations.
-func (xl xlObjects) PutObject(ctx context.Context, bucket string, object string, data *hash.Reader, metadata map[string]string, opts ObjectOptions) (objInfo ObjectInfo, err error) {
+func (xl xlObjects) PutObject(ctx context.Context, bucket string, object string, data *PutObjReader, opts ObjectOptions) (objInfo ObjectInfo, err error) {
 	// Validate put object input args.
 	if err = checkPutObjectArgs(ctx, bucket, object, xl, data.Size()); err != nil {
 		return ObjectInfo{}, err
@@ -651,21 +543,22 @@ func (xl xlObjects) PutObject(ctx context.Context, bucket string, object string,
 		return objInfo, err
 	}
 	defer objectLock.Unlock()
-	return xl.putObject(ctx, bucket, object, data, metadata, opts)
+	return xl.putObject(ctx, bucket, object, data, opts)
 }
 
 // putObject wrapper for xl PutObject
-func (xl xlObjects) putObject(ctx context.Context, bucket string, object string, data *hash.Reader, metadata map[string]string, opts ObjectOptions) (objInfo ObjectInfo, err error) {
+func (xl xlObjects) putObject(ctx context.Context, bucket string, object string, r *PutObjReader, opts ObjectOptions) (objInfo ObjectInfo, err error) {
+	data := r.Reader
+
 	uniqueID := mustGetUUID()
 	tempObj := uniqueID
-
 	// No metadata is set, allocate a new one.
-	if metadata == nil {
-		metadata = make(map[string]string)
+	if opts.UserDefined == nil {
+		opts.UserDefined = make(map[string]string)
 	}
 
 	// Get parity and data drive count based on storage class metadata
-	dataDrives, parityDrives := getRedundancyCount(metadata[amzStorageClass], len(xl.getDisks()))
+	dataDrives, parityDrives := getRedundancyCount(opts.UserDefined[amzStorageClass], len(xl.getDisks()))
 
 	// we now know the number of blocks this object needs for data and parity.
 	// writeQuorum is dataBlocks + 1
@@ -697,7 +590,7 @@ func (xl xlObjects) putObject(ctx context.Context, bucket string, object string,
 			return ObjectInfo{}, toObjectErr(err, bucket, object)
 		}
 
-		return dirObjectInfo(bucket, object, data.Size(), metadata), nil
+		return dirObjectInfo(bucket, object, data.Size(), opts.UserDefined), nil
 	}
 
 	// Validate put object input args.
@@ -770,6 +663,7 @@ func (xl xlObjects) putObject(ctx context.Context, bucket string, object string,
 		var curPartSize int64
 		curPartSize, err = calculatePartSizeFromIdx(ctx, data.Size(), globalPutPartSize, partIdx)
 		if err != nil {
+			logger.LogIf(ctx, err)
 			return ObjectInfo{}, toObjectErr(err, bucket, object)
 		}
 
@@ -777,27 +671,24 @@ func (xl xlObjects) putObject(ctx context.Context, bucket string, object string,
 		// This is only an optimization.
 		var curPartReader io.Reader
 
-		if curPartSize >= 0 {
-			pErr := xl.prepareFile(ctx, minioMetaTmpBucket, tempErasureObj, curPartSize, onlineDisks, xlMeta.Erasure.BlockSize, xlMeta.Erasure.DataBlocks, writeQuorum)
-			if pErr != nil {
-				return ObjectInfo{}, toObjectErr(pErr, bucket, object)
-			}
-		}
-
 		if curPartSize < data.Size() {
 			curPartReader = io.LimitReader(reader, curPartSize)
 		} else {
 			curPartReader = reader
 		}
 
-		writers := make([]*bitrotWriter, len(onlineDisks))
+		writers := make([]io.Writer, len(onlineDisks))
 		for i, disk := range onlineDisks {
 			if disk == nil {
 				continue
 			}
-			writers[i] = newBitrotWriter(disk, minioMetaTmpBucket, tempErasureObj, DefaultBitrotAlgorithm)
+			writers[i] = newBitrotWriter(disk, minioMetaTmpBucket, tempErasureObj, erasure.ShardFileSize(curPartSize), DefaultBitrotAlgorithm, erasure.ShardSize())
 		}
+
 		n, erasureErr := erasure.Encode(ctx, curPartReader, writers, buffer, erasure.dataBlocks+1)
+		// Note: we should not be defer'ing the following closeBitrotWriters() call as we are inside a for loop i.e if we use defer, we would accumulate a lot of open files by the time
+		// we return from this function.
+		closeBitrotWriters(writers)
 		if erasureErr != nil {
 			return ObjectInfo{}, toObjectErr(erasureErr, minioMetaTmpBucket, tempErasureObj)
 		}
@@ -830,7 +721,7 @@ func (xl xlObjects) putObject(ctx context.Context, bucket string, object string,
 				continue
 			}
 			partsMetadata[i].AddObjectPart(partIdx, partName, "", n, data.ActualSize())
-			partsMetadata[i].Erasure.AddChecksumInfo(ChecksumInfo{partName, DefaultBitrotAlgorithm, w.Sum()})
+			partsMetadata[i].Erasure.AddChecksumInfo(ChecksumInfo{partName, DefaultBitrotAlgorithm, bitrotWriterSum(w)})
 		}
 
 		// We wrote everything, break out.
@@ -841,11 +732,12 @@ func (xl xlObjects) putObject(ctx context.Context, bucket string, object string,
 
 	// Save additional erasureMetadata.
 	modTime := UTCNow()
-	metadata["etag"] = hex.EncodeToString(data.MD5Current())
+
+	opts.UserDefined["etag"] = r.MD5CurrentHexString()
 
 	// Guess content-type from the extension if possible.
-	if metadata["content-type"] == "" {
-		metadata["content-type"] = mimedb.TypeByExtension(path.Ext(object))
+	if opts.UserDefined["content-type"] == "" {
+		opts.UserDefined["content-type"] = mimedb.TypeByExtension(path.Ext(object))
 	}
 
 	if xl.isObject(bucket, object) {
@@ -872,7 +764,7 @@ func (xl xlObjects) putObject(ctx context.Context, bucket string, object string,
 	// Fill all the necessary metadata.
 	// Update `xl.json` content on each disks.
 	for index := range partsMetadata {
-		partsMetadata[index].Meta = metadata
+		partsMetadata[index].Meta = opts.UserDefined
 		partsMetadata[index].Stat.Size = sizeWritten
 		partsMetadata[index].Stat.ModTime = modTime
 	}

@@ -16,7 +16,7 @@
 
 package cmd
 
-const storageRESTVersion = "v1"
+const storageRESTVersion = "v4"
 const storageRESTPath = minioReservedBucketPath + "/storage/" + storageRESTVersion + "/"
 
 const (
@@ -26,14 +26,17 @@ const (
 	storageRESTMethodDeleteVol = "deletevol"
 	storageRESTMethodListVols  = "listvols"
 
-	storageRESTMethodPrepareFile = "preparefile"
-	storageRESTMethodAppendFile  = "appendfile"
-	storageRESTMethodStatFile    = "statfile"
-	storageRESTMethodReadAll     = "readall"
-	storageRESTMethodReadFile    = "readfile"
-	storageRESTMethodListDir     = "listdir"
-	storageRESTMethodDeleteFile  = "deletefile"
-	storageRESTMethodRenameFile  = "renamefile"
+	storageRESTMethodAppendFile     = "appendfile"
+	storageRESTMethodCreateFile     = "createfile"
+	storageRESTMethodWriteAll       = "writeall"
+	storageRESTMethodStatFile       = "statfile"
+	storageRESTMethodReadAll        = "readall"
+	storageRESTMethodReadFile       = "readfile"
+	storageRESTMethodReadFileStream = "readfilestream"
+	storageRESTMethodListDir        = "listdir"
+	storageRESTMethodDeleteFile     = "deletefile"
+	storageRESTMethodRenameFile     = "renamefile"
+	storageRESTMethodGetInstanceID  = "getinstanceid"
 )
 
 const (
@@ -49,4 +52,5 @@ const (
 	storageRESTCount      = "count"
 	storageRESTBitrotAlgo = "bitrot-algo"
 	storageRESTBitrotHash = "bitrot-hash"
+	storageRESTInstanceID = "instance-id"
 )

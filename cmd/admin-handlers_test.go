@@ -29,7 +29,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/gorilla/mux"
 	"github.com/minio/minio/pkg/auth"
@@ -38,7 +37,7 @@ import (
 
 var (
 	configJSON = []byte(`{
-  "version": "31",
+  "version": "33",
   "credential": {
     "accessKey": "minio",
     "secretKey": "minio123"
@@ -119,11 +118,12 @@ var (
         "broker": "",
         "topic": "",
         "qos": 0,
-        "clientId": "",
         "username": "",
         "password": "",
         "reconnectInterval": 0,
-        "keepAliveInterval": 0
+	"keepAliveInterval": 0,
+	"queueDir": "",
+        "queueLimit": 0
       }
     },
     "mysql": {
@@ -152,10 +152,20 @@ var (
         "streaming": {
           "enable": false,
           "clusterID": "",
-          "clientID": "",
           "async": false,
           "maxPubAcksInflight": 0
         }
+      }
+	},
+    "nsq": {
+      "1": {
+        "enable": false,
+        "nsqdAddress": "",
+        "topic": "",
+        "tls": {
+			"enable": false,
+			"skipVerify": false
+		}
       }
     },
     "postgresql": {
@@ -221,10 +231,9 @@ var (
 // adminXLTestBed - encapsulates subsystems that need to be setup for
 // admin-handler unit tests.
 type adminXLTestBed struct {
-	configPath string
-	xlDirs     []string
-	objLayer   ObjectLayer
-	router     *mux.Router
+	xlDirs   []string
+	objLayer ObjectLayer
+	router   *mux.Router
 }
 
 // prepareAdminXLTestBed - helper function that setups a single-node
@@ -260,14 +269,20 @@ func prepareAdminXLTestBed() (*adminXLTestBed, error) {
 	// Init global heal state
 	initAllHealState(globalIsXL)
 
-	globalNotificationSys = NewNotificationSys(globalServerConfig, globalEndpoints)
+	globalConfigSys = NewConfigSys()
 
-	// Create new policy system.
+	globalIAMSys = NewIAMSys()
+	globalIAMSys.Init(objLayer)
+
 	globalPolicySys = NewPolicySys()
+	globalPolicySys.Init(objLayer)
+
+	globalNotificationSys = NewNotificationSys(globalServerConfig, globalEndpoints)
+	globalNotificationSys.Init(objLayer)
 
 	// Setup admin mgmt REST API handlers.
 	adminRouter := mux.NewRouter()
-	registerAdminRouter(adminRouter)
+	registerAdminRouter(adminRouter, true, true)
 
 	return &adminXLTestBed{
 		xlDirs:   xlDirs,
@@ -298,8 +313,8 @@ func (atb *adminXLTestBed) GenerateHealTestData(t *testing.T) {
 		for i := 0; i < 10; i++ {
 			objectName := fmt.Sprintf("%s-%d", objName, i)
 			_, err = atb.objLayer.PutObject(context.Background(), bucketName, objectName,
-				mustGetHashReader(t, bytes.NewReader([]byte("hello")),
-					int64(len("hello")), "", ""), nil, ObjectOptions{})
+				mustGetPutObjReader(t, bytes.NewReader([]byte("hello")),
+					int64(len("hello")), "", ""), ObjectOptions{})
 			if err != nil {
 				t.Fatalf("Failed to create %s - %v", objectName,
 					err)
@@ -311,13 +326,13 @@ func (atb *adminXLTestBed) GenerateHealTestData(t *testing.T) {
 	{
 		objName := "mpObject"
 		uploadID, err := atb.objLayer.NewMultipartUpload(context.Background(), bucketName,
-			objName, nil, ObjectOptions{})
+			objName, ObjectOptions{})
 		if err != nil {
 			t.Fatalf("mp new error: %v", err)
 		}
 
 		_, err = atb.objLayer.PutObjectPart(context.Background(), bucketName, objName,
-			uploadID, 3, mustGetHashReader(t, bytes.NewReader(
+			uploadID, 3, mustGetPutObjReader(t, bytes.NewReader(
 				[]byte("hello")), int64(len("hello")), "", ""), ObjectOptions{})
 		if err != nil {
 			t.Fatalf("mp put error: %v", err)
@@ -523,7 +538,6 @@ func testServicesCmdHandler(cmd cmdType, t *testing.T) {
 	// single node setup, this degenerates to a simple function
 	// call under the hood.
 	globalMinioAddr = "127.0.0.1:9000"
-	initGlobalAdminPeers(mustGetNewEndpointList("http://127.0.0.1:9000/d1"))
 
 	var wg sync.WaitGroup
 
@@ -539,7 +553,7 @@ func testServicesCmdHandler(cmd cmdType, t *testing.T) {
 	credentials := globalServerConfig.GetCredential()
 
 	body, err := json.Marshal(madmin.ServiceAction{
-		cmd.toServiceActionValue()})
+		Action: cmd.toServiceActionValue()})
 	if err != nil {
 		t.Fatalf("JSONify error: %v", err)
 	}
@@ -597,7 +611,6 @@ func TestServiceSetCreds(t *testing.T) {
 	// single node setup, this degenerates to a simple function
 	// call under the hood.
 	globalMinioAddr = "127.0.0.1:9000"
-	initGlobalAdminPeers(mustGetNewEndpointList("http://127.0.0.1:9000/d1"))
 
 	credentials := globalServerConfig.GetCredential()
 
@@ -696,7 +709,6 @@ func TestGetConfigHandler(t *testing.T) {
 
 	// Initialize admin peers to make admin RPC calls.
 	globalMinioAddr = "127.0.0.1:9000"
-	initGlobalAdminPeers(mustGetNewEndpointList("http://127.0.0.1:9000/d1"))
 
 	// Prepare query params for get-config mgmt REST API.
 	queryVal := url.Values{}
@@ -725,7 +737,6 @@ func TestSetConfigHandler(t *testing.T) {
 
 	// Initialize admin peers to make admin RPC calls.
 	globalMinioAddr = "127.0.0.1:9000"
-	initGlobalAdminPeers(mustGetNewEndpointList("http://127.0.0.1:9000/d1"))
 
 	// Prepare query params for set-config mgmt REST API.
 	queryVal := url.Values{}
@@ -746,7 +757,7 @@ func TestSetConfigHandler(t *testing.T) {
 	rec := httptest.NewRecorder()
 	adminTestBed.router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
-		t.Errorf("Expected to succeed but failed with %d", rec.Code)
+		t.Errorf("Expected to succeed but failed with %d, body: %s", rec.Code, rec.Body)
 	}
 
 	// Check that a very large config file returns an error.
@@ -761,7 +772,7 @@ func TestSetConfigHandler(t *testing.T) {
 
 		rec := httptest.NewRecorder()
 		adminTestBed.router.ServeHTTP(rec, req)
-		respBody := string(rec.Body.Bytes())
+		respBody := rec.Body.String()
 		if rec.Code != http.StatusBadRequest ||
 			!strings.Contains(respBody, "Configuration data provided exceeds the allowed maximum of") {
 			t.Errorf("Got unexpected response code or body %d - %s", rec.Code, respBody)
@@ -780,7 +791,7 @@ func TestSetConfigHandler(t *testing.T) {
 
 		rec := httptest.NewRecorder()
 		adminTestBed.router.ServeHTTP(rec, req)
-		respBody := string(rec.Body.Bytes())
+		respBody := rec.Body.String()
 		if rec.Code != http.StatusBadRequest ||
 			!strings.Contains(respBody, "JSON configuration provided is of incorrect format") {
 			t.Errorf("Got unexpected response code or body %d - %s", rec.Code, respBody)
@@ -797,7 +808,6 @@ func TestAdminServerInfo(t *testing.T) {
 
 	// Initialize admin peers to make admin RPC calls.
 	globalMinioAddr = "127.0.0.1:9000"
-	initGlobalAdminPeers(mustGetNewEndpointList("http://127.0.0.1:9000/d1"))
 
 	// Prepare query params for set-config mgmt REST API.
 	queryVal := url.Values{}
@@ -837,8 +847,8 @@ func TestAdminServerInfo(t *testing.T) {
 	}
 }
 
-// TestToAdminAPIErr - test for toAdminAPIErr helper function.
-func TestToAdminAPIErr(t *testing.T) {
+// TestToAdminAPIErrCode - test for toAdminAPIErrCode helper function.
+func TestToAdminAPIErrCode(t *testing.T) {
 	testCases := []struct {
 		err            error
 		expectedAPIErr APIErrorCode
@@ -856,180 +866,15 @@ func TestToAdminAPIErr(t *testing.T) {
 		// 3. Non-admin API specific error.
 		{
 			err:            errDiskNotFound,
-			expectedAPIErr: toAPIErrorCode(errDiskNotFound),
+			expectedAPIErr: toAPIErrorCode(context.Background(), errDiskNotFound),
 		},
 	}
 
 	for i, test := range testCases {
-		actualErr := toAdminAPIErrCode(test.err)
+		actualErr := toAdminAPIErrCode(context.Background(), test.err)
 		if actualErr != test.expectedAPIErr {
 			t.Errorf("Test %d: Expected %v but received %v",
 				i+1, test.expectedAPIErr, actualErr)
-		}
-	}
-}
-
-func mkHealStartReq(t *testing.T, bucket, prefix string,
-	opts madmin.HealOpts) *http.Request {
-
-	body, err := json.Marshal(opts)
-	if err != nil {
-		t.Fatalf("Unable marshal heal opts")
-	}
-
-	path := fmt.Sprintf("/minio/admin/v1/heal/%s", bucket)
-	if bucket != "" && prefix != "" {
-		path += "/" + prefix
-	}
-
-	req, err := newTestRequest("POST", path,
-		int64(len(body)), bytes.NewReader(body))
-	if err != nil {
-		t.Fatalf("Failed to construct request - %v", err)
-	}
-	cred := globalServerConfig.GetCredential()
-	err = signRequestV4(req, cred.AccessKey, cred.SecretKey)
-	if err != nil {
-		t.Fatalf("Failed to sign request - %v", err)
-	}
-
-	return req
-}
-
-func mkHealStatusReq(t *testing.T, bucket, prefix,
-	clientToken string) *http.Request {
-
-	path := fmt.Sprintf("/minio/admin/v1/heal/%s", bucket)
-	if bucket != "" && prefix != "" {
-		path += "/" + prefix
-	}
-	path += fmt.Sprintf("?clientToken=%s", clientToken)
-
-	req, err := newTestRequest("POST", path, 0, nil)
-	if err != nil {
-		t.Fatalf("Failed to construct request - %v", err)
-	}
-	cred := globalServerConfig.GetCredential()
-	err = signRequestV4(req, cred.AccessKey, cred.SecretKey)
-	if err != nil {
-		t.Fatalf("Failed to sign request - %v", err)
-	}
-
-	return req
-}
-
-func collectHealResults(t *testing.T, adminTestBed *adminXLTestBed, bucket,
-	prefix, clientToken string, timeLimitSecs int) madmin.HealTaskStatus {
-
-	var res, cur madmin.HealTaskStatus
-
-	// loop and fetch heal status. have a time-limit to loop over
-	// all statuses.
-	timeLimit := UTCNow().Add(time.Second * time.Duration(timeLimitSecs))
-	for cur.Summary != healStoppedStatus && cur.Summary != healFinishedStatus {
-		if UTCNow().After(timeLimit) {
-			t.Fatalf("heal-status loop took too long - clientToken: %s", clientToken)
-		}
-		req := mkHealStatusReq(t, bucket, prefix, clientToken)
-		rec := httptest.NewRecorder()
-		adminTestBed.router.ServeHTTP(rec, req)
-		if http.StatusOK != rec.Code {
-			t.Errorf("Unexpected status code - got %d but expected %d",
-				rec.Code, http.StatusOK)
-			break
-		}
-		err := json.NewDecoder(rec.Body).Decode(&cur)
-		if err != nil {
-			t.Errorf("unable to unmarshal resp: %v", err)
-			break
-		}
-
-		// all results are accumulated into a slice
-		// and returned to caller in the end
-		allItems := append(res.Items, cur.Items...)
-		res = cur
-		res.Items = allItems
-
-		time.Sleep(time.Millisecond * 200)
-	}
-
-	return res
-}
-
-func TestHealStartNStatusHandler(t *testing.T) {
-	adminTestBed, err := prepareAdminXLTestBed()
-	if err != nil {
-		t.Fatal("Failed to initialize a single node XL backend for admin handler tests.")
-	}
-	defer adminTestBed.TearDown()
-
-	// gen. test data
-	adminTestBed.GenerateHealTestData(t)
-	defer adminTestBed.CleanupHealTestData(t)
-
-	// Prepare heal-start request to send to the server.
-	healOpts := madmin.HealOpts{
-		Recursive: true,
-		DryRun:    false,
-	}
-	bucketName, objName := "mybucket", "myobject-0"
-	var hss madmin.HealStartSuccess
-
-	{
-		req := mkHealStartReq(t, bucketName, objName, healOpts)
-		rec := httptest.NewRecorder()
-		adminTestBed.router.ServeHTTP(rec, req)
-		if http.StatusOK != rec.Code {
-			t.Errorf("Unexpected status code - got %d but expected %d",
-				rec.Code, http.StatusOK)
-		}
-
-		err = json.Unmarshal(rec.Body.Bytes(), &hss)
-		if err != nil {
-			t.Fatal("unable to unmarshal response")
-		}
-
-		if hss.ClientToken == "" {
-			t.Errorf("unexpected result")
-		}
-	}
-
-	{
-		// test with an invalid client token
-		req := mkHealStatusReq(t, bucketName, objName, hss.ClientToken+hss.ClientToken)
-		rec := httptest.NewRecorder()
-		adminTestBed.router.ServeHTTP(rec, req)
-		if rec.Code != http.StatusBadRequest {
-			t.Errorf("Unexpected status code")
-		}
-	}
-
-	{
-		// fetch heal status
-		results := collectHealResults(t, adminTestBed, bucketName,
-			objName, hss.ClientToken, 5)
-
-		// check if we got back an expected record
-		foundIt := false
-		for _, item := range results.Items {
-			if item.Type == madmin.HealItemObject &&
-				item.Bucket == bucketName && item.Object == objName {
-				foundIt = true
-			}
-		}
-		if !foundIt {
-			t.Error("did not find expected heal record in heal results")
-		}
-
-		// check that the heal settings in the results is the
-		// same as what we started the heal seq. with.
-		if results.HealSettings != healOpts {
-			t.Errorf("unexpected heal settings: %v",
-				results.HealSettings)
-		}
-
-		if results.Summary == healStoppedStatus {
-			t.Errorf("heal sequence stopped unexpectedly")
 		}
 	}
 }
