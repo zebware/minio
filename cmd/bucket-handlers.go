@@ -226,7 +226,7 @@ func (api objectAPIHandlers) ListBucketsHandler(w http.ResponseWriter, r *http.R
 				continue
 			}
 			bucketsInfo = append(bucketsInfo, BucketInfo{
-				Name:    strings.Trim(dnsRecord.Key, slashSeparator),
+				Name:    dnsRecord.Key,
 				Created: dnsRecord.CreationDate,
 			})
 			bucketSet.Add(dnsRecord.Key)
@@ -595,8 +595,8 @@ func (api objectAPIHandlers) PostPolicyBucketHandler(w http.ResponseWriter, r *h
 		}
 
 		// Make sure formValues adhere to policy restrictions.
-		if errCode = checkPostPolicy(formValues, postPolicyForm); errCode != ErrNone {
-			writeErrorResponse(ctx, w, errorCodes.ToAPIErr(errCode), r.URL, guessIsBrowserReq(r))
+		if err = checkPostPolicy(formValues, postPolicyForm); err != nil {
+			writeCustomErrorResponseXML(ctx, w, errorCodes.ToAPIErr(ErrAccessDenied), err.Error(), r.URL, guessIsBrowserReq(r))
 			return
 		}
 
