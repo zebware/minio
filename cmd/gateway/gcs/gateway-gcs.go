@@ -1418,23 +1418,24 @@ func (l *gcsGateway) GetBucketPolicy(ctx context.Context, bucket string) (*polic
 		}
 	}
 
-	actionSet := policy.NewActionSet()
+	bucketActionSet := policy.NewActionSet()
+	objectActionSet := policy.NewActionSet()
 	if readOnly {
-		actionSet.Add(policy.GetBucketLocationAction)
-		actionSet.Add(policy.ListBucketAction)
-		actionSet.Add(policy.GetObjectAction)
+		bucketActionSet.Add(policy.GetBucketLocationAction)
+		bucketActionSet.Add(policy.ListBucketAction)
+		objectActionSet.Add(policy.GetObjectAction)
 	}
 	if writeOnly {
-		actionSet.Add(policy.GetBucketLocationAction)
-		actionSet.Add(policy.ListBucketMultipartUploadsAction)
-		actionSet.Add(policy.AbortMultipartUploadAction)
-		actionSet.Add(policy.DeleteObjectAction)
-		actionSet.Add(policy.ListMultipartUploadPartsAction)
-		actionSet.Add(policy.PutObjectAction)
+		bucketActionSet.Add(policy.GetBucketLocationAction)
+		bucketActionSet.Add(policy.ListBucketMultipartUploadsAction)
+		objectActionSet.Add(policy.AbortMultipartUploadAction)
+		objectActionSet.Add(policy.DeleteObjectAction)
+		objectActionSet.Add(policy.ListMultipartUploadPartsAction)
+		objectActionSet.Add(policy.PutObjectAction)
 	}
 
 	// Return NoSuchBucketPolicy error, when policy is not set
-	if len(actionSet) == 0 {
+	if len(bucketActionSet)+len(objectActionSet) == 0 {
 		return nil, gcsToObjectError(minio.BucketPolicyNotFound{}, bucket)
 	}
 
@@ -1444,9 +1445,17 @@ func (l *gcsGateway) GetBucketPolicy(ctx context.Context, bucket string) (*polic
 			policy.NewStatement(
 				policy.Allow,
 				policy.NewPrincipal("*"),
-				actionSet,
+				bucketActionSet,
 				policy.NewResourceSet(
 					policy.NewResource(bucket, ""),
+				),
+				condition.NewFunctions(),
+			),
+			policy.NewStatement(
+				policy.Allow,
+				policy.NewPrincipal("*"),
+				objectActionSet,
+				policy.NewResourceSet(
 					policy.NewResource(bucket, "*"),
 				),
 				condition.NewFunctions(),
